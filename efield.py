@@ -5,22 +5,48 @@ import torch
 from torch import nn
 
 
+class Box(NamedTuple):
+    xmin: float
+    xmax: float
+    ymin: float
+    ymax: float
+    zmin: float
+    zmax: float
+
+    def grid(self, nx: int, ny: int, nz: int) -> torch.Tensor:
+        return (
+            torch.stack(
+                torch.meshgrid(
+                    torch.linspace(self.xmin, self.xmax, nx),
+                    torch.linspace(self.ymin, self.ymax, ny),
+                    torch.linspace(self.zmin, self.zmax, nz),
+                    indexing="xy",
+                )
+            )
+            .reshape(3, -1)
+            .T
+        )
+
+
 def potential_operator(
     locations3d: torch.Tensor,
     anchor_locations3d: torch.Tensor,
-    anchor_widths: torch.Tensor,
+    anchor_scale: torch.Tensor,
 ) -> torch.Tensor:
     if locations3d.shape[1] != 3:
         raise ValueError("Locations3d must be an Nx3 tensor")
+    if anchor_locations3d.shape[1] != 3:
+        raise ValueError("anchor_locations3d must be an Mx3 tensor")
 
     D = torch.cdist(locations3d.unsqueeze(0), anchor_locations3d.unsqueeze(0)).squeeze()
-    return torch.exp(-anchor_widths * D**2)
+    assert D.shape == (len(locations3d), len(anchor_locations3d))
+    return torch.exp(-anchor_scale * D**2)
 
 
 def field_operator(
     locations3d: torch.Tensor,
     anchor_locations3d: torch.Tensor,
-    anchor_widths: torch.Tensor,
+    anchor_scale: torch.Tensor,
 ) -> torch.Tensor:
     """A tensor that converts coeffients to the derivative of the field wrt the
     coordinate axes at the given locations.
@@ -30,12 +56,12 @@ def field_operator(
 
     Returns a 3x len(locations3d) x len(anchor_locations) tensor.
     """
-    k = potential_operator(locations3d, anchor_locations3d, anchor_widths)
+    k = potential_operator(locations3d, anchor_locations3d, anchor_scale)
 
     # The derivative of k wrt the coordinat axes.
     return (
         -2
-        * anchor_widths
+        * anchor_scale
         * k
         * torch.stack(
             (
@@ -63,18 +89,27 @@ class Potential(nn.Module):
 
     def forward(self, locations3d: torch.Tensor) -> torch.Tensor:
         return (
-            potential_operator(locations3d, self.anchor_locations3d, self.anchor_widths)
+            potential_operator(
+                locations3d, self.anchor_locations3d, 1 / self.anchor_widths**2
+            )
             @ self.anchor_weights
         )
 
     def field(self, locations3d: torch.Tensor) -> torch.Tensor:
         return (
-            field_operator(locations3d, self.anchor_locations3d, self.anchor_widths)
+            field_operator(
+                locations3d, self.anchor_locations3d, 1 / self.anchor_widths**2
+            )
             @ self.anchor_weights
         )
 
-    def enclosed_charge(sphere_center3d: torch.Tensor, sphere_radius: float) -> float:
+    def enclosed_charge(enclosure: Box) -> float:
         raise NotImplementedError()
+
+
+class IllConditionedMatrixError(ValueError):
+    def __init__(self, msg: str):
+        super().__init__(msg)
 
 
 def minimum_norm_in_subspace(
@@ -85,12 +120,17 @@ def minimum_norm_in_subspace(
     if B.shape[0] > B.shape[1]:
         raise ValueError("The constrained must be under-determined")
 
-    # The constraint ipmlies that x must have the form
+    # The constraint implies that x must have the form
     #   x = x0 - Z u
-    # where x0 = B\b, and Z is the null space of B.
+    # where x0 = B\b, and the columns of Z span the null space of B.
     U, s, Vt = torch.linalg.svd(B, full_matrices=True)
     x0 = Vt[: U.shape[0]].T @ (U.T / s[:, None]) @ b
     Z = Vt[U.shape[0] :, :].T
+    if s[0] / s[-1] > 1e10:
+        raise IllConditionedMatrixError(
+            "B is ill-conditioned. Condition number: %g.\nSpectrum: %s"
+            % (s[0] / s[-1], s)
+        )
 
     # The objective, in terms of u, is
     #
@@ -143,35 +183,19 @@ def test_pair_of_points():
 test_pair_of_points()
 
 
-class Box(NamedTuple):
-    xmin: float
-    xmax: float
-    ymin: float
-    ymax: float
-    zmin: float
-    zmax: float
-
-    def grid(self, nx: int, ny: int, nz: int) -> torch.Tensor:
-        return (
-            torch.stack(
-                torch.meshgrid(
-                    torch.linspace(self.xmin, self.xmax, nx),
-                    torch.linspace(self.ymin, self.ymax, ny),
-                    torch.linspace(self.zmin, self.zmax, nz),
-                    indexing="xy",
-                )
-            )
-            .reshape(3, -1)
-            .T
-        )
-
-
 def potential_function(
     test_locations3d: torch.Tensor,
     conductor_locations3d: torch.Tensor,
     conductor_potentials: torch.Tensor,
     verbose=True,
 ) -> Potential:
+    if test_locations3d.shape[1] != 3:
+        raise ValueError("test_locations3 must be Mx3 tensor.")
+    if conductor_locations3d.shape[1] != 3:
+        raise ValueError("conductor_locations3d must be Nx3 tensor.")
+    if conductor_potentials.ndim != 1:
+        raise ValueError("condctuctor_potential must be an N-dimensional vector.")
+
     # Solve the constrained optimization problem
     #
     #   min_f \int_x ||d/dx f(x)||^2
@@ -184,24 +208,33 @@ def potential_function(
 
     results: List[Result] = []
 
-    baseline_anchor_width = (torch.cdist(test_locations3d, test_locations3d)).mean()
-    for anchor_width in (torch.linspace(0.1, 1, 20) * baseline_anchor_width) ** 2:
+    baseline_anchor_width = torch.cdist(test_locations3d, test_locations3d).mean()
+    for anchor_width in torch.linspace(0.5, 1.5, 10) * baseline_anchor_width:
         # A 3*N x N matrix that maps coefficients to the electric field. The
         # field is represented as a 3*N long vector.
-        DK = field_operator(test_locations3d, test_locations3d, anchor_width).reshape(
-            -1, len(test_locations3d)
-        )
-        # An M x N matrix that maps coefficients to voltage on the M conductors.
-        K = potential_operator(conductor_locations3d, test_locations3d, anchor_width)
+        DK = field_operator(
+            test_locations3d, test_locations3d, 1 / anchor_width**2
+        ).reshape(-1, len(test_locations3d))
 
-        coeffs = minimum_norm_in_subspace(DK, K, conductor_potentials)
+        # An M x N matrix that maps coefficients to voltage on the M conductors.
+        K = potential_operator(
+            conductor_locations3d, test_locations3d, 1 / anchor_width**2
+        )
+
+        try:
+            coeffs = minimum_norm_in_subspace(DK, K, conductor_potentials)
+        except IllConditionedMatrixError as e:
+            print("Skipping anchor_width %g. %s" % (anchor_width, e))
+            continue
 
         results.append(
             Result(
-                torch.norm(DK @ coeffs).item(),
-                torch.norm(K @ coeffs - conductor_potentials).item()
+                field_energy=torch.norm(DK @ coeffs).item(),
+                constraint_violation=torch.norm(
+                    K @ coeffs - conductor_potentials
+                ).item()
                 / len(conductor_potentials),
-                Potential(test_locations3d, coeffs, anchor_width),
+                potential=Potential(test_locations3d, coeffs, anchor_width),
             )
         )
 
