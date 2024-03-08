@@ -113,54 +113,28 @@ class IllConditionedMatrixError(ValueError):
 
 
 def minimum_norm_in_subspace(
-    A: torch.Tensor, B: torch.Tensor, b: torch.Tensor
+    M: torch.Tensor, K: torch.Tensor, b: torch.Tensor
 ) -> torch.Tensor:
-    "Minimize ||Ax|| subject to Bx=b over x."
+    """Minimize x'Mx subject to Ax=b over x.
 
-    if B.shape[0] > B.shape[1]:
-        raise ValueError("The constrained must be under-determined")
+    See simulatord.md for a derivation.
+    """
+    if K.shape[0] > K.shape[1]:
+        raise ValueError("The constraint must be under-determined")
 
-    # The constraint implies that x must have the form
-    #   x = x0 - Z u
-    # where x0 = B\b, and the columns of Z span the null space of B.
-    U, s, Vt = torch.linalg.svd(B, full_matrices=True)
-    x0 = Vt[: U.shape[0]].T @ (U.T / s[:, None]) @ b
-    Z = Vt[U.shape[0] :, :].T
-    if s[0] / s[-1] > 1e10:
-        raise IllConditionedMatrixError(
-            "B is ill-conditioned. Condition number: %g.\nSpectrum: %s"
-            % (s[0] / s[-1], s)
-        )
-
-    # The objective, in terms of u, is
-    #
-    #   ||Ax||^2 = ||A (x0 - Z u)||^2
-    #
-    # Differenting wrt to u and setting to zero gives
-    #
-    #   0 = Z'A'A (x0 - Z u)
-    #
-    # So
-    #
-    #  Z'A'AZ u = Z'A'A x0, or
-    #
-    # equivalently,
-    #
-    #    u = AZ \ A x0
-    u = torch.linalg.lstsq(A @ Z, A @ x0)[0]
-
-    return x0 - Z @ u
+    V = torch.linalg.solve(M, K.T)
+    return V @ torch.linalg.solve(K @ V, b)
 
 
 def test_minimum_L2_norm_in_subspace():
-    B = torch.randn(3, 5)
+    A = torch.randn(3, 5)
     b = torch.rand(3)
 
-    x = minimum_norm_in_subspace(torch.eye(5), B, b)
+    x = minimum_norm_in_subspace(torch.eye(5), A, b)
 
-    x_true = torch.linalg.lstsq(B, b)[0]
+    x_true = torch.linalg.lstsq(A, b)[0]
 
-    assert torch.allclose(B @ x, b)
+    assert torch.allclose(A @ x, b)
     assert torch.allclose(x, x_true)
 
 
@@ -184,14 +158,14 @@ test_pair_of_points()
 
 
 def potential_function(
-    test_locations3d: torch.Tensor,
+    anchor_locations3d: torch.Tensor,
     conductor_locations3d: torch.Tensor,
     conductor_potentials: torch.Tensor,
     verbose=True,
 ) -> Potential:
-    if test_locations3d.shape[1] != 3:
+    if not (anchor_locations3d.ndim == 2 and anchor_locations3d.shape[1] == 3):
         raise ValueError("test_locations3 must be Mx3 tensor.")
-    if conductor_locations3d.shape[1] != 3:
+    if not (conductor_locations3d.ndim == 2 or conductor_locations3d.shape[1] == 3):
         raise ValueError("conductor_locations3d must be Nx3 tensor.")
     if conductor_potentials.ndim != 1:
         raise ValueError("condctuctor_potential must be an N-dimensional vector.")
@@ -200,6 +174,10 @@ def potential_function(
     #
     #   min_f \int_x ||d/dx f(x)||^2
     #   s.t.  f(x) = V(x) when for all x on the conductors.
+    #
+    # When f(x) = sum_i coeffs[i] exp(-||x-anchor[i]||^2/width^2),
+    # this problem reduces to minimizing a quadratic form subject to linear
+    # constraints. See simulation.md for an explanation.
 
     class Result(NamedTuple):
         field_energy: float
@@ -208,33 +186,39 @@ def potential_function(
 
     results: List[Result] = []
 
-    baseline_anchor_width = torch.cdist(test_locations3d, test_locations3d).mean()
-    for anchor_width in torch.linspace(0.5, 1.5, 10) * baseline_anchor_width:
-        # A 3*N x N matrix that maps coefficients to the electric field. The
-        # field is represented as a 3*N long vector.
-        DK = field_operator(
-            test_locations3d, test_locations3d, 1 / anchor_width**2
-        ).reshape(-1, len(test_locations3d))
+    norms_sq = torch.linalg.norm(anchor_locations3d) ** 2
 
-        # An M x N matrix that maps coefficients to voltage on the M conductors.
+    baseline_anchor_width = torch.cdist(anchor_locations3d, anchor_locations3d).mean()
+    for anchor_width in torch.linspace(0.5, 1.5, 10) * baseline_anchor_width:
+        # A matrix M so that coeffs' M coeffs gives the energy of the field.
+        M = (
+            1
+            / anchor_width
+            * potential_operator(
+                anchor_locations3d, anchor_locations3d, (0.5 / anchor_width) ** 2
+            )
+            * (anchor_width**2 - norms_sq[:, None] - norms_sq[None, :])
+        )
+
+        # A matrix that maps coefficients to voltage on the M conductors.
         K = potential_operator(
-            conductor_locations3d, test_locations3d, 1 / anchor_width**2
+            conductor_locations3d, anchor_locations3d, 1 / anchor_width**2
         )
 
         try:
-            coeffs = minimum_norm_in_subspace(DK, K, conductor_potentials)
+            coeffs = minimum_norm_in_subspace(M, K, conductor_potentials)
         except IllConditionedMatrixError as e:
             print("Skipping anchor_width %g. %s" % (anchor_width, e))
             continue
 
         results.append(
             Result(
-                field_energy=torch.norm(DK @ coeffs).item(),
+                field_energy=(coeffs.T @ K @ coeffs).item(),
                 constraint_violation=torch.norm(
                     K @ coeffs - conductor_potentials
                 ).item()
                 / len(conductor_potentials),
-                potential=Potential(test_locations3d, coeffs, anchor_width),
+                potential=Potential(anchor_locations3d, coeffs, anchor_width),
             )
         )
 
