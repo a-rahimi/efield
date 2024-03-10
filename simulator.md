@@ -51,15 +51,15 @@ $$
 \|\nabla V(x)\|^2 = \frac{1}{\sigma^4} \sum_{ij} \alpha_i \alpha_j (x-x_i)^\top(x-x_i)\exp\left(-\frac{\|x-x_i\|^2+\|x-x_j\|^2}{2\sigma^2}\right) 
 $$
 
-Completing the square for the quantity in the exponent yields
+The exponent can be massaged into a more convenient form by completing the square:
 
 $$\begin{align}
-\|x-x_i\|^2+\|x-x_j\|^2 &= 2 \|x\|^2-2(x_i+x_j)^\top x+\|x_i\|^2 + \|x_j\|^2 \\
+\|x-x_i\|^2+\|x-x_j\|^2 &= 2 \|x\|^2 - 2(x_i+x_j)^\top x+\|x_i\|^2 + \|x_j\|^2 \\
 &= 2 \left\|x-\frac{x_i+x_j}{2}\right\|^2-2\left\|\frac{x_i+x_j}{2}\right\|^2+\|x_i\|^2 + \|x_j\|^2 \\
 &= 2 \left\|x-\frac{x_i+x_j}{2}\right\|^2 + \frac{1}{2}\|x_i-x_j\|^2.
 \end{align}$$
 
-Plugging back gives
+Plugging this back gives
 
 $$
 \|\nabla V(x)\|^2 = \frac{1}{\sigma^4} \sum_{ij} \alpha_i \alpha_j (x-x_i)^\top (x-x_i)\exp\left(-\frac{ \left\|x-\frac{x_i+x_j}{2}\right\|^2} {\sigma^2}\right) \exp\left(-\frac{\|x_i-x_j\|^2}{4 \sigma^2}\right)
@@ -70,18 +70,20 @@ The objective is the indefinite integral of this quantity. This is a Gaussian in
 $$\begin{align}
 \int \|\nabla V(x)\|^2 \; dx &= \frac{1}{\sigma^4} \sum_{ij} \alpha_i \alpha_j\exp\left(-\frac{\left\|x_i-x_j\right\|^2}{4\sigma^2}\right) \int (x-x_i)^\top(x-x_i)\exp\left(-\frac{ \left\|x-\frac{x_i+x_j}{2}\right\|^2} {\sigma^2}\right) \; dx \\
 &=
- \frac{\pi^{3/2}}{2\sigma} \sum_{ij} \alpha_i \alpha_j\exp\left(-\frac{\left\|x_i-x_j\right\|^2}{4\sigma^2}\right) \left(\sigma^2 - \|x_1\|^2 - \|x_2\|^2\right).
+ \frac{\pi^{3/2}}{\sigma} \sum_{ij} \alpha_i \alpha_j\exp\left(-\frac{\left\|x_i-x_j\right\|^2}{4\sigma^2}\right) \left(\tfrac{3}{2}\sigma^2 - \frac{\|x_i-x_j\|^2 }{4}\right).
 \end{align}$$
 
-The second equality follows because
-the integral is the expected value of $(x-x_i)^\top(x-x_j)$ when $x$ is drawn from a Gaussian distribution with mean $(x_i+x_j)/2$ and variance $\sigma^2/2$. This is derived step-by-step in the appendix. 
+The second equality follows because the integral is the expected value of
+$(x-x_i)^\top(x-x_j)$ when $x$ is drawn from a Gaussian distribution with mean
+$(x_i+x_j)/2$ and variance $\sigma^2/2$. This is derived step-by-step in the
+appendix. 
 
 # Solving for the parameters of the field
 
 We can restate the variational search over the potential function as an
 optimization problem over the coefficients $a_1,\ldots,a_N$. Define the $N\times N$ matrix M whose $ij$th entry is
 $$
-M_{ij} \equiv \frac{\pi^{3/2}}{2\sigma} \exp\left(-\frac{\left\|x_i-x_j\right\|^2}{4\sigma^2}\right) \left(\sigma^2 - \|x_1\|^2 - \|x_2\|^2\right),
+M_{ij} \equiv \frac{\pi^{3/2}}{\sigma} \exp\left(-\frac{\left\|x_i-x_j\right\|^2}{4\sigma^2}\right) \left(\tfrac{3}{2}\sigma^2 - \frac{\|x_i - x_j\|^2 }{4} \right),
 $$
 and a matrix $K$ whose $ui$th entry is
 
@@ -106,13 +108,13 @@ v_0 &= M^{-1} K^\top
 
 # Appendix: The expected value of a Quadratic form under a Gaussian
 
-Let $\mu=(x_1+x_2)/2$. Then
+Let $\mu=(x_1+x_2)/2$, with $x_1$ and $x_2$ in $\R^3$. Then
 
 $$\begin{align}
-\E_{x \sim \mathcal{N}(\mu, \sigma^2)} (x-x_1)^\top (x-x_2) &= \E x^2 - (x_1+x_2)^\top\E x + x_1^\top x_2 \\
-&= \sigma^2 + \mu^2 - (x_1+x_2)^\top\mu + x_1^\top x_2 \\
-&= \sigma^2  - \|x_1+x_2\|^2/2 + x_1^\top x_2 \\
-&= \sigma^2 - \|x_1\|^2/2 - \|x_2\|^2/2.
+\E_{x \sim \mathcal{N}(\mu, \sigma^2)} (x-x_1)^\top (x-x_2) &= \E \|x\|^2 - (x_1+x_2)^\top\E x + x_1^\top x_2 \\
+&= 3\sigma^2 + \mu^2 - (x_1+x_2)^\top\mu + x_1^\top x_2 \\
+&= 3\sigma^2 - \|x_1+x_2\|^2/4 + x_1^\top x_2 \\
+&= 3\sigma^2 - \|x_1-x_2\|^2/4
 \end{align}$$
 
 # Appendix: Closed form solution to linearly constrained quadratic minimization
