@@ -1,4 +1,4 @@
-from typing import List, NamedTuple
+from typing import NamedTuple, Tuple
 
 import matplotlib.pylab as plt
 import torch
@@ -26,6 +26,13 @@ class Box(NamedTuple):
             )
             .reshape(3, -1)
             .T
+        )
+
+    def sizes(self) -> Tuple[float, float, float]:
+        return (
+            (self.xmax - self.xmin),
+            (self.ymax - self.ymin),
+            (self.zmax - self.zmin),
         )
 
 
@@ -83,40 +90,122 @@ def field_operator(
     )
 
 
+def laplacian_operator(
+    locations3d: torch.Tensor,
+    anchor_locations3d: torch.Tensor,
+    anchor_width: torch.Tensor,
+) -> torch.Tensor:
+    D2 = pairwise_squared_distances(locations3d, anchor_locations3d)
+    k = torch.exp(-0.5 * D2 / anchor_width**2)
+    return 1 / anchor_width**2 * (D2 / anchor_width**2 - 3) * k
+
+
+def sample_uniform(box: Box, sample_size: int) -> torch.Tensor:
+    return torch.rand(sample_size, 3) * torch.tensor(box.sizes()) + torch.tensor(
+        [box.xmin, box.ymin, box.zmin]
+    )
+
+
+def sample_from_laplacian(
+    universe: Box,
+    anchor_locations3d: torch.Tensor,
+    anchor_width: torch.Tensor,
+    coeffs: torch.Tensor,
+    sample_size: int = 10,
+):
+    # We want to draw a sample from a distribution p(x). We don't know how to
+    # directly sample from p(x), and we can only evaluate it up to a constant.
+    # In other words, our only access to p(x) is through a function psi(x) so
+    # that p(x) = 1/Z psi(x), and Z is unknown. Our approach is to first draw
+    # instead a sample from a uniform proposal distribution q(x). We will keep
+    # each draw with probability psi(x).
+    #
+    # Here is how to show that this results in a sample from p: We can use it to
+    # compute the expectation of any function f(x) under p(x).  Let S denote the
+    # sample obtained from the above scheme. Then
+    #
+    #   1/(V Z n) sum_{x in S} f(x)
+    #
+    # with x_i ~ q is an unbiased estimate of E f(x) with x~p. Because this
+    # holds for all f, this implies that S is a sample from p.
+    #
+    # To show that the above estimator is an unbiased estimate of E_{x~p} f(x),
+    # let the boolean w_i denote whether we accepted sample x_i, so that E[w_i |
+    # x_i] = psi(x_i). Then the estimator boils down to
+    #
+    #   1/(V Z n) sum_i w_i f(x_i).
+    #
+    # Taking expectations with respect to w (conditioned on x) gives
+    #
+    #   1/(V Z n) sum_i psi(x_i) f(x_i).
+    #
+    # Then taking expectation over x~q gives
+    #
+    #   1/n sum_i \int psi(x)/Z f(x) dx = E_{x~p) f(x).
+
+    sample = []
+    while len(sample) < sample_size:
+        # Draw proposals from a uniform distribution.
+        proposal_sample = sample_uniform(universe, sample_size)
+
+        # The un-normalized probability of each draw under the target distribution. We're
+        # guaranteed that these un-normalized target probabilities are between 0 and
+        # 1.
+        prob_under_target = (
+            2
+            * torch.special.expit(
+                torch.abs(
+                    laplacian_operator(
+                        proposal_sample, anchor_locations3d, anchor_width
+                    )
+                    @ coeffs
+                )
+            )
+            - 1
+        )
+
+        # Keep each draw with the above probability.
+        keep_draw = torch.rand(len(prob_under_target)) < prob_under_target
+
+        sample.append(proposal_sample[keep_draw])
+
+    return torch.vstack(sample)
+
+
 class Potential(nn.Module):
     """Map a point in three-dimensional space to a scalar potential."""
 
     def __init__(
         self,
         anchor_locations3d: torch.Tensor,
-        anchor_weights: torch.Tensor,
+        anchor_coeffs: torch.Tensor,
         anchor_widths: torch.Tensor,
     ):
         super().__init__()
         self.anchor_locations3d = nn.Parameter(anchor_locations3d)
-        self.anchor_weights = nn.Parameter(anchor_weights)
+        self.anchor_coeffs = nn.Parameter(anchor_coeffs)
         self.anchor_widths = nn.Parameter(anchor_widths)
 
     def forward(self, locations3d: torch.Tensor) -> torch.Tensor:
         return (
             potential_operator(locations3d, self.anchor_locations3d, self.anchor_widths)
-            @ self.anchor_weights
+            @ self.anchor_coeffs
         )
 
     def field(self, locations3d: torch.Tensor) -> torch.Tensor:
         return (
             field_operator(locations3d, self.anchor_locations3d, self.anchor_widths)
-            @ self.anchor_weights
+            @ self.anchor_coeffs
+        )
+
+    def laplacian(self, locations3d: torch.Tensor) -> torch.Tensor:
+        return (
+            laplacian_operator(locations3d, self.anchor_locations3d, self.anchor_widths)
+            @ self.anchor_coeffs
         )
 
     def enclosed_charge(enclosure: Box) -> float:
         raise NotImplementedError()
-
-
-def solve(A, b):
-    "Solve for x in A x = b."
-    return torch.linalg.solve(A, b)
-    # return torch.linalg.lstsq(A, b)[0]
 
 
 def minimum_norm_in_subspace(
@@ -136,18 +225,16 @@ def minimum_norm_in_subspace(
     K = K.to(torch.float64)
     b = b.to(torch.float64)
 
-    V = solve(M, K.T)
-    return (V @ solve(K @ V, b)).to(original_type)
+    V = torch.linalg.solve(M, K.T)
+    return (V @ torch.linalg.solve(K @ V, b)).to(original_type)
 
 
 def potential_function(
-    anchor_locations3d: torch.Tensor,
+    universe: Box,
     conductor_locations3d: torch.Tensor,
     conductor_potentials: torch.Tensor,
     verbose=True,
 ) -> Potential:
-    if not (anchor_locations3d.ndim == 2 and anchor_locations3d.shape[1] == 3):
-        raise ValueError("test_locations3 must be Mx3 tensor.")
     if not (conductor_locations3d.ndim == 2 or conductor_locations3d.shape[1] == 3):
         raise ValueError("conductor_locations3d must be Nx3 tensor.")
     if conductor_potentials.ndim != 1:
@@ -162,70 +249,58 @@ def potential_function(
     # this problem reduces to minimizing a quadratic form subject to linear
     # constraints. See simulation.md for an explanation.
 
-    class Result(NamedTuple):
-        field_energy: float
-        constraint_violation: float
-        potential: Potential
+    anchor_locations3d = conductor_locations3d
 
-    results: List[Result] = []
+    num_anchors = []
+    energies = []
+    constraint_violations = []
+    extra_anchor_locations3d = None
+    for _ in tqdm.tqdm(range(100)):
+        if extra_anchor_locations3d is not None:
+            anchor_locations3d = torch.vstack(
+                (anchor_locations3d, extra_anchor_locations3d)
+            )
 
-    baseline_anchor_width = torch.std(anchor_locations3d).item()
+        anchor_width = torch.std(anchor_locations3d).item() * 1.0
+        print("anchor width:", anchor_width)
 
-    for anchor_width in tqdm.tqdm(
-        torch.linspace(0.05, 0.5, 20) * baseline_anchor_width
-    ):
-        # A matrix M so that coeffs' M coeffs gives the energy of the field.
+        # A matrix that stores the squared distance between every pair of anchor locations.
         D2 = pairwise_squared_distances(anchor_locations3d, anchor_locations3d)
+
+        # A matrix M so that coeffs' M coeffs gives the energy of the field.
         M = (
             torch.exp(-D2 / (anchor_width**2 * 4))
             * (1.5 * anchor_width**2 - D2 / 4)
             / anchor_width
         )
+        M += 1e-4 * torch.eye(len(anchor_locations3d))
 
         # A matrix that maps coefficients to voltage on the M conductors.
         K = potential_operator(conductor_locations3d, anchor_locations3d, anchor_width)
 
         coeffs = minimum_norm_in_subspace(M, K, conductor_potentials)
 
-        results.append(
-            Result(
-                field_energy=(coeffs @ M @ coeffs).item(),
-                constraint_violation=torch.abs(K @ coeffs - conductor_potentials)
-                .mean()
-                .item(),
-                potential=Potential(anchor_locations3d, coeffs, anchor_width),
-            )
+        # Sample some new anchor points. These are added to the set of anchors
+        # on the next iteration of the loop.
+        extra_anchor_locations3d = sample_from_laplacian(
+            universe, anchor_locations3d, anchor_width, coeffs
+        )
+        num_anchors.append(len(anchor_locations3d))
+        energies.append(coeffs @ M @ coeffs)
+        constraint_violations.append(
+            torch.abs(K @ coeffs - conductor_potentials).mean()
         )
 
     if verbose:
-        anchor_widths = [r.potential.anchor_widths.item() for r in results]
-
         _, ax = plt.subplots(1, 1)
-
-        # ax.axvline(baseline_anchor_width, ls=":", color="gray")
-
-        best_result = min([r for r in results if r.constraint_violation < 0.01])
-
-        ax.axhline(best_result.field_energy, ls="--", lw=1)
-        ax.axvline(best_result.potential.anchor_widths.item(), ls="--", lw=1)
-
-        ax.plot(anchor_widths, [r.field_energy for r in results], color="c")
-        ax.set_xlabel("anchor_width")
+        ax.plot(num_anchors, energies, color="c")
+        ax.set_xlabel("Number of anchors")
         ax.set_ylabel("Field energy", color="c")
         ax.tick_params(axis="y", labelcolor="c")
 
         ax2 = ax.twinx()
-        ax2.plot(
-            anchor_widths,
-            [r.constraint_violation for r in results],
-            color="r",
-        )
-        ax2.set_ylabel("Constraing violation norm", color="r")
+        ax2.plot(num_anchors, constraint_violations, color="r")
+        ax2.set_ylabel("Constraint violation", color="r")
         ax2.tick_params(axis="y", labelcolor="r")
-        print(
-            best_result.field_energy,
-            best_result.constraint_violation,
-            best_result.potential.anchor_widths.item(),
-        )
 
-    return best_result.potential
+    return Potential(anchor_locations3d, coeffs, torch.tensor(anchor_width))
