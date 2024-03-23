@@ -1,4 +1,5 @@
 import torch
+from torch import nn
 
 import efield
 
@@ -97,7 +98,9 @@ def test_field_energy():
     # everaging the norm of the gradient of this field over these random draws.
     box_width = 10
     xyz = box_width * (torch.rand(10_000_000, 3) - 0.5)
-    Vxyz = efield.field_operator(xyz, anchor_locations3d, sigma).sum(axis=2)
+    Vxyz = efield.RadialBasisFunctionOperators.field_operator(
+        xyz, anchor_locations3d, sigma
+    ).sum(axis=2)
     empirical = (Vxyz**2).sum() * box_width**3 / len(xyz)
 
     # Compare against the analytic solutino derived in simulator.md

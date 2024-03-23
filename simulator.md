@@ -33,8 +33,9 @@ dense grid.
 We'll consider fields that take the Radial Basis Function (RBF) form $$V(x) =
 \sum_{i=1}^N \alpha_i \exp\left(-\frac{\|x-x_i\|^2}{2\sigma^2}\right).$$ Here,
 $x_1,\ldots x_N\in \R^3$ are a set of pre-determined _anchor points_. The
-parameters of the potential function are the weights $\alpha_1\ldots\alpha_N$.  We'll be
-searching for values of these that solve the Dirichlet formulation above.
+parameters of the potential function are the weights $\alpha_1\ldots\alpha_N$.
+We'll be searching for values of these that solve the Dirichlet formulation
+above.
 
 ## Representing the objective function
 
@@ -42,13 +43,13 @@ The objective function above relies on the gradient of the objective function
 (which is the corresponding electric field). It is
 $$\begin{align}
 \nabla V(x) &= \sum_i \alpha_i \nabla \exp\left(-\frac{\|x-x_i\|^2}{2\sigma^2}\right) \\
-&= -\sum_i \alpha_i \frac{x-x_i}{\sigma^2}\exp\left(-\frac{\|x-x_i\|^2}{2\sigma^2}\right) 
+&= -\sum_i \alpha_i \frac{x-x_i}{\sigma^2}\exp\left(-\frac{\|x-x_i\|^2}{2\sigma^2}\right)
 \end{align}$$
 
 Its squared norm is therefore
 
 $$
-\|\nabla V(x)\|^2 = \frac{1}{\sigma^4} \sum_{ij} \alpha_i \alpha_j (x-x_i)^\top(x-x_i)\exp\left(-\frac{\|x-x_i\|^2+\|x-x_j\|^2}{2\sigma^2}\right) 
+\|\nabla V(x)\|^2 = \frac{1}{\sigma^4} \sum_{ij} \alpha_i \alpha_j (x-x_i)^\top(x-x_i)\exp\left(-\frac{\|x-x_i\|^2+\|x-x_j\|^2}{2\sigma^2}\right)
 $$
 
 The exponent can be massaged into a more convenient form by completing the square:
@@ -76,12 +77,13 @@ $$\begin{align}
 The second equality follows because the integral is the expected value of
 $(x-x_i)^\top(x-x_j)$ when $x$ is drawn from a Gaussian distribution with mean
 $(x_i+x_j)/2$ and variance $\sigma^2/2$. This is derived step-by-step in the
-appendix. 
+appendix and tested in `test_field_energy`.
 
 # Solving for the parameters of the field
 
 We can restate the variational search over the potential function as an
-optimization problem over the coefficients $a_1,\ldots,a_N$. Define the $N\times N$ matrix M whose $ij$th entry is
+optimization problem over the coefficients $a_1,\ldots,a_N$. Define the $N\times
+N$ matrix M whose $ij$th entry is
 $$
 M_{ij} \equiv \frac{\pi^{3/2}}{\sigma} \exp\left(-\frac{\left\|x_i-x_j\right\|^2}{4\sigma^2}\right) \left(\tfrac{3}{2}\sigma^2 - \frac{\|x_i - x_j\|^2 }{4} \right),
 $$
@@ -89,8 +91,8 @@ and a matrix $K$ whose $ui$th entry is
 
 $$K_{ui} = \exp\left(-\frac{\|x_u-x_i\|^2}{2\sigma^2}\right),$$
 
-where each $x_u$ is a point on one of the conductors. Then 
-search over the parameters of the potential function becomes
+where each $x_u$ is a point on one of the conductors. Then search over the
+parameters of the potential function becomes
 $$\begin{align}
 \min_{\alpha \R^n} \; \alpha^\top M \alpha \quad \text{s.t.}\quad K \alpha = v_0,
 \end{align}$$
@@ -119,4 +121,9 @@ $$\begin{align}
 
 # Appendix: Closed form solution to linearly constrained quadratic minimization
 
-We want to minimize $\tfrac{1}{2}x^\top Mx$ subject to $Ax = b$. The Lagrangian for this problem is $\tfrac{1}{2}x^\top Mx + \lambda^\top (Ax-b)$. At a saddle point of the Lagrangian, we have $0=Mx + A^\top\lambda$, which means $x = M^{-1} A^\top \lambda$. Plugging this back into the constraint gives $A M^{-1}A^\top \lambda = b$, so that $\lambda = \left[A M^{-1}A^\top\right]^{-1} b$, and therefore $x=M^{-1}A^\top \left[A M^{-1}A^\top\right]^{-1} b$.
+We want to minimize $\tfrac{1}{2}x^\top Mx$ subject to $Ax = b$. The Lagrangian
+for this problem is $\tfrac{1}{2}x^\top Mx + \lambda^\top (Ax-b)$. At a saddle
+point of the Lagrangian, we have $0=Mx + A^\top\lambda$, which means $x = M^{-1}
+A^\top \lambda$. Plugging this back into the constraint gives $A M^{-1}A^\top
+\lambda = b$, so that $\lambda = \left[A M^{-1}A^\top\right]^{-1} b$, and
+therefore $x=M^{-1}A^\top \left[A M^{-1}A^\top\right]^{-1} b$.
