@@ -1,0 +1,1 @@
+Simulator for static electric fields. See [simulator.md](simulator.html) for the design of the simulator.

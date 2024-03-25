@@ -1,3 +1,6 @@
+$$\newcommand{\R}{\mathbb{R}}
+\newcommand{\E}{\mathop{\mathbb{R}}}$$
+
 # Static Electric Field as a Variational Problem
 
 We would like to recover the potential function $V:\R^3 \to \R$ in free space
@@ -6,9 +9,17 @@ conductors. Typically, we would find $V$ by solving the Poisson equation $\Delta
 V=0$ subject to the constraint $V(x)=V_0(x)$ whenever $x$ lies on a conductor,
 and $V_0(x)$ is the specified potential of conductor. Here $\Delta$ is the
 Laplace operator, which sums the second derivative of $V$ across each dimension.
-This is a differential equation with boundary constraints, and the are many ways
-to solve this equation. The simulator converts this to a variational problem,
-which it solves using a least squares solver.
+This is a differential equation with boundary constraints. There are many ways
+to solve this equation. 
+
+Instead of solving the Poisson equation directly, the simulator first converts
+it to a variational problem. Under this formulation, the simulator searches for
+a potential function that has the lowest possible energy, yet still satisfies
+the boundary conditions.  To find such a function doesn't require us to grid the
+space, or peek at every point in space to check the Laplacian. Instead,
+computing this energy requires computing an integral, which we can compute
+exactly in closed form. We can also minimize this integral without gridding the
+space.
 
 ## Variational Formulation
 
@@ -106,9 +117,41 @@ $$\begin{align}
 v_0 &= M^{-1} K^\top
 \end{align}$$
 
-# Appendix: Proof of the Dirichlet Principle
+# Recovering the charge from the field
 
-# Appendix: The expected value of a Quadratic form under a Gaussian
+Once we know the field around a conductor, we can determine the charge on the
+conductor with Gauss's law.  The charge $q$ enclosed within a volume $P$ is the
+flux of the field through the boundary $\delta P$ of $P$. Formally,
+
+$$q = \int_{\delta P} \nabla V(x)^\top \hat{n}(x) \; dx,$$
+
+where $\hat{n}(x)$ is the surface normal of the boundary.
+
+When $P$ is an axis-aligned box, and $V$ has the Radial Basis Function form
+assumed above, we can recover $q$ in closed form.
+
+The boundary $\delta P$ has six rectangular faces, denoted by $U_1,\ldots, U_6$. Substituting for $\nabla V$ and rearranging terms, the integral above expands to
+
+$$q = -\frac{1}{\sigma^2}\sum_i\alpha_i\sum_{f=1}^6 \int_{U_f} \exp\left(-\frac{\|x-x_i\|^2}{2\sigma^2}\right) (x-x_i)^\top \hat{n}(x) \; dx$$
+
+The first face to consider is a rectangle in the xy plane,
+$$U_1 \equiv \{(x,y,z_0) \;|\; x_\text{min}<x<x_\text{max},\; y_\text{min}<y<y_\text{max}\},$$
+and it faces $\hat{n}=(0,0,1)$. Introducing the change of variables $x=(u,v,z_0)$,  the inner integral when $f=1$ simplifies to
+
+$$\begin{align}
+&\int_{U_1} \exp\left(-\frac{\|x-x_i\|^2}{2\sigma^2}\right) (x-x_i)^\top \hat{n}(x) \; dx \\
+=&\int_{x_\text{min}}^{x_\text{max}} \int_{y_\text{min}}^{y_\text{max}} \exp\left[-\frac{(u-x_{ix})^2 + (v-x_{iy})^2 + (z_0-x_{iz})^2}{2\sigma^2}\right] (z_0-x_{iz}) \; dudv \\
+=& \int_{x_\text{min}}^{x_\text{max}} e^{-\frac{(u-x_{ix})^2}{2\sigma^2}} \;du \cdot   \int_{y_\text{min}}^{y_\text{max}} e^{-\frac{(v-x_{iy})^2}{2 \sigma^2}} \; dv \cdot e^{-\frac{(z_0-x_{iz})^2}{2 \sigma^2}} \cdot (z_0-x_{iz})
+\end{align}$$
+
+The two integrals above can be written in terms of erf function. The integrals
+for the other five faces of $P$ result in similar closed form solutions.
+
+# Appendices
+
+## Appendix: Proof of the Dirichlet Principle
+
+## Appendix: The expected value of a Quadratic form under a Gaussian
 
 Let $\mu=(x_1+x_2)/2$, with $x_1$ and $x_2$ in $\R^3$. Then
 
@@ -119,7 +162,7 @@ $$\begin{align}
 &= 3\sigma^2 - \|x_1-x_2\|^2/4
 \end{align}$$
 
-# Appendix: Closed form solution to linearly constrained quadratic minimization
+## Appendix: Closed form solution to linearly constrained quadratic minimization
 
 We want to minimize $\tfrac{1}{2}x^\top Mx$ subject to $Ax = b$. The Lagrangian
 for this problem is $\tfrac{1}{2}x^\top Mx + \lambda^\top (Ax-b)$. At a saddle

@@ -1,5 +1,5 @@
+import numpy as np
 import torch
-from torch import nn
 
 import efield
 
@@ -115,3 +115,67 @@ def test_field_energy():
 
 
 test_field_energy()
+
+
+def test_integral_of_gaussian():
+    mean = 0.5
+    std = 2
+    xmin = 1.1
+    xmax = 1.8
+    actual = efield.integral_of_gaussian(
+        torch.tensor(mean), torch.tensor(std), torch.tensor(xmin), torch.tensor(xmax)
+    )
+
+    x = np.linspace(xmin, xmax, 10_000)
+    expected = sum(np.exp(-0.5 * (x - mean) ** 2 / std**2)) * (x[1] - x[0])
+
+    assert np.allclose(actual, expected, rtol=1e-4), (actual, expected)
+
+
+test_integral_of_gaussian()
+
+
+def random_radial_basis_function_potential() -> efield.RadialBasisFunctionPotential:
+    num_anchors = 10
+    return efield.RadialBasisFunctionPotential(
+        anchor_locations3d=torch.randn(num_anchors, 3),
+        anchor_coeffs=torch.rand(num_anchors),
+        anchor_parameters=torch.tensor(3.0),
+    )
+
+
+def test_flux_through_face():
+    potential = random_radial_basis_function_potential()
+
+    face = efield.Face(
+        efield.Axis(0, -1, +1),
+        efield.Axis(1, -0.5, +0.5),
+        offset_axis=2,
+        offset=0,
+        orientation=1,
+    )
+    # Compute the flux through the face using the closed form solution.
+    actual_flux = potential.flux_through_face(face)
+
+    # Compute the flux through the face with numerical quadrature.
+    X, Y = torch.meshgrid(
+        torch.linspace(face.first_axis.min, face.first_axis.max, 200),
+        torch.linspace(face.second_axis.min, face.second_axis.max, 200),
+        indexing="xy",
+    )
+    Z = torch.zeros_like(X) + face.offset
+    dx = X[0, 1] - X[0, 0]
+    dy = Y[1, 0] - Y[0, 0]
+
+    face_xyz = torch.stack((X.flatten(), Y.flatten(), Z.flatten())).T
+    field = potential.field(face_xyz)
+
+    expected_flux = (field[face.offset_axis, :] * face.orientation).sum() * dx * dy
+
+    assert torch.allclose(expected_flux, actual_flux, rtol=1e-2), (
+        expected_flux,
+        actual_flux,
+    )
+
+
+test_flux_through_face()

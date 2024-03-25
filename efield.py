@@ -1,9 +1,34 @@
-from typing import NamedTuple, Tuple
+from typing import List, NamedTuple, Tuple
+
+import math
 
 import matplotlib.pylab as plt
 import torch
 from torch import nn
 import tqdm
+
+
+class Axis(NamedTuple):
+    axis: int
+    min: float
+    max: float
+
+
+class Face(NamedTuple):
+    """A 2D axis-aligned d rectangle that servces as a face of an axis-aligned 3D box.
+
+    The rectangle is a subset of the the axis1-axis2 plane. Its surface normal
+    points along offset_axis if orientation=1, or toward the negative
+    offset_axis if orientation=-1.  It is offset from the origin by `offset`,
+    along the offset_axis dimension.
+    """
+
+    first_axis: Axis
+    second_axis: Axis
+
+    offset_axis: int
+    offset: float
+    orientation: int
 
 
 class Box(NamedTuple):
@@ -43,8 +68,61 @@ class Box(NamedTuple):
             / 2
         )
 
+    def faces(self) -> Tuple[Face]:
+        return (
+            # The front face.
+            Face(
+                Axis(0, self.xmin, self.xmax),
+                Axis(1, self.ymin, self.ymax),
+                offset_axis=2,
+                offset=self.zmax,
+                orientation=+1,
+            ),
+            # The back face.
+            Face(
+                Axis(0, self.xmin, self.xmax),
+                Axis(1, self.ymin, self.ymax),
+                offset_axis=2,
+                offset=self.zmin,
+                orientation=-1,
+            ),
+            # The top face.
+            Face(
+                Axis(0, self.xmin, self.xmax),
+                Axis(2, self.zmin, self.zmax),
+                offset_axis=1,
+                offset=self.ymax,
+                orientation=+1,
+            ),
+            # The bottom face.
+            Face(
+                Axis(0, self.xmin, self.xmax),
+                Axis(2, self.zmin, self.zmax),
+                offset_axis=1,
+                offset=self.ymin,
+                orientation=-1,
+            ),
+            # The right face.
+            Face(
+                Axis(1, self.ymin, self.ymax),
+                Axis(2, self.zmin, self.zmax),
+                offset_axis=0,
+                offset=self.xmax,
+                orientation=+1,
+            ),
+            # The left face.
+            Face(
+                Axis(1, self.ymin, self.ymax),
+                Axis(2, self.zmin, self.zmax),
+                offset_axis=0,
+                offset=self.xmin,
+                orientation=-1,
+            ),
+        )
+
 
 def sample_uniform(box: Box, sample_size: int) -> torch.Tensor:
+    "Draw points uniformly at random from a box."
     return torch.rand(sample_size, 3) * torch.tensor(box.sizes()) + torch.tensor(
         [box.xmin, box.ymin, box.zmin]
     )
@@ -101,6 +179,32 @@ class CoulombPotentialOperators:
         anchor_params: torch.Tensor,
     ) -> torch.Tensor:
         return torch.zeros((len(locations3d), len(anchor_locations3d)))
+
+
+def integral_of_gaussian(mean: float, std: float, xmin: float, xmax: float) -> float:
+    """Integrate a Gaussian with given mean and variance over the given interval.
+
+    Compute
+       int_xmin^xmax exp(-0.5 * (x-mean)^2 / std^2) dx
+
+    Notably, the Gaussian is not normalized.
+    """
+    # Pytorch's ndtr function computes
+    #   1/sqrt(2pi) int_-infty^x exp(-0.5 t^2/2) dt
+
+    # With the change of variables t(x)=(x-mean)/std, the integral we wanted to compute
+    # becomes
+    #   int_xmin^xmax exp(-(x-mean)^2/std^2/2) dx
+    # = int_t(xmin)^t(xmax) exp(-t^2/2) * std * dt
+    # = std*sqrt(2pi) * (ndtr(t(xmax)) - ndtr(t(xmin)))
+    return (
+        std
+        * math.sqrt(2 * torch.pi)
+        * (
+            torch.special.ndtr((xmax - mean) / std)
+            - torch.special.ndtr((xmin - mean) / std)
+        )
+    )
 
 
 class RadialBasisFunctionOperators:
@@ -161,6 +265,33 @@ class RadialBasisFunctionOperators:
         k = torch.exp(-0.5 * D2 / anchor_width**2)
         return 1 / anchor_width**2 * (D2 / anchor_width**2 - 3) * k
 
+    @staticmethod
+    def flux_through_face_operator(
+        face: Face, anchor_locations3d: torch.Tensor, anchor_width: torch.Tensor
+    ) -> float:
+        return (
+            -(anchor_width**-2)
+            * integral_of_gaussian(
+                anchor_locations3d[:, face.first_axis.axis],
+                anchor_width,
+                face.first_axis.min,
+                face.first_axis.max,
+            )
+            * integral_of_gaussian(
+                anchor_locations3d[:, face.second_axis.axis],
+                anchor_width,
+                face.second_axis.min,
+                face.second_axis.max,
+            )
+            * torch.exp(
+                -0.5
+                * (face.offset - anchor_locations3d[:, face.offset_axis]) ** 2
+                / anchor_width**2
+            )
+            * (face.offset - anchor_locations3d[:, face.offset_axis])
+            * face.orientation
+        )
+
 
 class Potential(nn.Module):
     def forward(self, locations3d: torch.Tensor) -> torch.Tensor:
@@ -172,8 +303,11 @@ class Potential(nn.Module):
     def laplacian(self, locations3d: torch.Tensor) -> torch.Tensor:
         raise NotImplementedError
 
-    def enclosed_charge(enclosure: Box) -> float:
-        raise NotImplementedError()
+    def flux_through_face(self, face: Face) -> float:
+        raise NotImplementedError
+
+    def enclosed_charge(self, enclosure: Box) -> float:
+        return sum(self.flux_through_face(face) for face in enclosure.faces())
 
 
 class LinearPotential(Potential):
@@ -213,6 +347,14 @@ class LinearPotential(Potential):
         return (
             self.laplacian_operator(
                 locations3d, self.anchor_locations3d, self.anchor_parameters
+            )
+            @ self.anchor_coeffs
+        )
+
+    def flux_through_face(self, face: Face) -> float:
+        return (
+            self.flux_through_face_operator(
+                face, self.anchor_locations3d, self.anchor_parameters
             )
             @ self.anchor_coeffs
         )
@@ -319,6 +461,7 @@ def fit_radial_basis_function_potential(
     conductor_locations3d: torch.Tensor,
     conductor_potentials: torch.Tensor,
     verbose=True,
+    num_rounds=70,
 ) -> RadialBasisFunctionPotential:
     if not (conductor_locations3d.ndim == 2 and conductor_locations3d.shape[1] == 3):
         raise ValueError("conductor_locations3d must be Nx3 tensor.")
@@ -346,7 +489,7 @@ def fit_radial_basis_function_potential(
     energies = []
     constraint_violations = []
     extra_anchor_locations3d = None
-    for _ in tqdm.tqdm(range(100)):
+    for _ in tqdm.tqdm(range(num_rounds)):
         if extra_anchor_locations3d is not None:
             # Add the anchor locations that were discovered during the
             # previous iteration of this loop.
