@@ -2,18 +2,7 @@ import numpy as np
 import torch
 
 import efield
-
-
-def test_pairwise_squared_distances():
-    A = torch.rand(3, 2)
-    B = torch.rand(4, 2)
-
-    D_expected = torch.cdist(A.unsqueeze(0), B.unsqueeze(0)).squeeze() ** 2
-    D_actual = efield.pairwise_squared_distances(A, B)
-    assert torch.allclose(D_expected, D_actual, atol=1e-4), (D_expected, D_actual)
-
-
-test_pairwise_squared_distances()
+import geometry
 
 
 def test_minimum_norm_in_subspace_minimum_L2_norm_in_subspace():
@@ -26,9 +15,6 @@ def test_minimum_norm_in_subspace_minimum_L2_norm_in_subspace():
 
     assert torch.allclose(A @ x, b, rtol=1e-3)
     assert torch.allclose(x, x_true)
-
-
-test_minimum_norm_in_subspace_minimum_L2_norm_in_subspace()
 
 
 def test_minimum_norm_in_subspace_pair_of_points():
@@ -54,9 +40,6 @@ def test_minimum_norm_in_subspace_pair_of_points():
     assert torch.allclose(x, torch.tensor((2 - 6 / 5, 6 / 5))), x
 
 
-test_minimum_norm_in_subspace_pair_of_points()
-
-
 def test_quadratic_form():
     x = torch.randn(3)
     x1 = torch.randn(3)
@@ -66,9 +49,6 @@ def test_quadratic_form():
         2 * torch.linalg.norm(x - (x1 + x2) / 2) ** 2
         + 0.5 * torch.linalg.norm(x1 - x2) ** 2,
     )
-
-
-test_quadratic_form()
 
 
 def test_quadratic_form_expectation():
@@ -86,9 +66,6 @@ def test_quadratic_form_expectation():
     assert torch.allclose(empirical, analytical, atol=1e-3)
 
 
-test_quadratic_form_expectation()
-
-
 def test_field_energy():
     sigma = 1.3
     anchor_locations3d = torch.randn(4, 3)
@@ -104,7 +81,7 @@ def test_field_energy():
     empirical = (Vxyz**2).sum() * box_width**3 / len(xyz)
 
     # Compare against the analytic solutino derived in simulator.md
-    D2 = efield.pairwise_squared_distances(anchor_locations3d, anchor_locations3d)
+    D2 = geometry.pairwise_squared_distances(anchor_locations3d, anchor_locations3d)
     analytical = (
         torch.sum(torch.exp(-D2 / sigma**2 / 4) * (3 / 2 * sigma**2 - D2 / 4))
         / sigma
@@ -112,9 +89,6 @@ def test_field_energy():
     )
 
     assert torch.allclose(analytical, empirical, rtol=1e-2), (analytical, empirical)
-
-
-test_field_energy()
 
 
 def test_integral_of_gaussian():
@@ -132,9 +106,6 @@ def test_integral_of_gaussian():
     assert np.allclose(actual, expected, rtol=1e-4), (actual, expected)
 
 
-test_integral_of_gaussian()
-
-
 def random_radial_basis_function_potential() -> efield.RadialBasisFunctionPotential:
     num_anchors = 10
     return efield.RadialBasisFunctionPotential(
@@ -147,9 +118,9 @@ def random_radial_basis_function_potential() -> efield.RadialBasisFunctionPotent
 def test_flux_through_face():
     potential = random_radial_basis_function_potential()
 
-    face = efield.Face(
-        efield.Axis(0, -1, +1),
-        efield.Axis(1, -0.5, +0.5),
+    face = geometry.Face(
+        geometry.Axis(0, -1, +1),
+        geometry.Axis(1, -0.5, +0.5),
         offset_axis=2,
         offset=0,
         orientation=1,
@@ -176,6 +147,3 @@ def test_flux_through_face():
         expected_flux,
         actual_flux,
     )
-
-
-test_flux_through_face()
