@@ -6,6 +6,10 @@ import geometry
 
 
 def test_minimum_norm_in_subspace_minimum_L2_norm_in_subspace():
+    # Test efield.minimum_norm_in_subspace by checking that when we
+    # ask it solve the problem
+    #   min ||x|| s.t. Ax=b
+    # it returns just A\b.
     A = torch.randn(3, 5)
     b = torch.rand(3)
 
@@ -18,7 +22,8 @@ def test_minimum_norm_in_subspace_minimum_L2_norm_in_subspace():
 
 
 def test_minimum_norm_in_subspace_pair_of_points():
-    # Solve the problem
+    # Test efield.minimum_norm_in_subspace by checking its solution to
+    # the problem
     #
     #   min ||x1||^2 + ||x1 - x2||^2 s.t x1 + x2 = 2
     #
@@ -29,7 +34,7 @@ def test_minimum_norm_in_subspace_pair_of_points():
     #
     # or
     #
-    #    6 = 5 x2.
+    #    6 = 5 * x2.
 
     M = torch.outer(torch.tensor([1.0, -1.0]), torch.tensor([1.0, -1.0]))
     M[0, 0] += 1
@@ -41,6 +46,11 @@ def test_minimum_norm_in_subspace_pair_of_points():
 
 
 def test_quadratic_form():
+    # Check that
+    #
+    #   ||x-x1||^2 + ||x-x1||^2 =  2 * ||x-(x1+x2)/2||^2 + 1/2 * ||x1-x2||^2.
+    #
+    # This result is used in simulator.md.
     x = torch.randn(3)
     x1 = torch.randn(3)
     x2 = torch.randn(3)
@@ -52,6 +62,8 @@ def test_quadratic_form():
 
 
 def test_quadratic_form_expectation():
+    # Check that the expected value of (x-x1)'(x-x2) when x ~ N(mu,sigma^2)
+    # is 3 sigma^2 - ||x1-x2||^2/4.
     ndim = 3
     x1 = torch.rand(ndim)
     x2 = torch.rand(ndim)
@@ -67,6 +79,8 @@ def test_quadratic_form_expectation():
 
 
 def test_field_energy():
+    # Confirm the quadratic form that evaluates to the energy of a field.
+
     sigma = 1.3
     anchor_locations3d = torch.randn(4, 3)
 
@@ -92,6 +106,8 @@ def test_field_energy():
 
 
 def test_integral_of_gaussian():
+    # Compare the output efield.integral_of_gaussian against a numerical
+    # integration.
     mean = 0.5
     std = 2
     xmin = 1.1
@@ -116,11 +132,14 @@ def random_radial_basis_function_potential() -> efield.RadialBasisFunctionPotent
 
 
 def test_flux_through_face():
+    # Compare the closed form flux through a rectangular face against a
+    # numerically integrated answer.
+
     potential = random_radial_basis_function_potential()
 
     face = geometry.Face(
-        geometry.Axis(0, -1, +1),
-        geometry.Axis(1, -0.5, +0.5),
+        geometry.AxisAlignedInterval(0, -1, +1),
+        geometry.AxisAlignedInterval(1, -0.5, +0.5),
         offset_axis=2,
         offset=0,
         orientation=1,

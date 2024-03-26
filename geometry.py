@@ -3,7 +3,7 @@ from typing import NamedTuple, Tuple
 import torch
 
 
-class Axis(NamedTuple):
+class AxisAlignedInterval(NamedTuple):
     axis: int
     min: float
     max: float
@@ -18,8 +18,8 @@ class Face(NamedTuple):
     along the offset_axis dimension.
     """
 
-    first_axis: Axis
-    second_axis: Axis
+    first_axis: AxisAlignedInterval
+    second_axis: AxisAlignedInterval
 
     offset_axis: int
     offset: float
@@ -67,48 +67,48 @@ class Box(NamedTuple):
         return (
             # The front face.
             Face(
-                Axis(0, self.xmin, self.xmax),
-                Axis(1, self.ymin, self.ymax),
+                AxisAlignedInterval(0, self.xmin, self.xmax),
+                AxisAlignedInterval(1, self.ymin, self.ymax),
                 offset_axis=2,
                 offset=self.zmax,
                 orientation=+1,
             ),
             # The back face.
             Face(
-                Axis(0, self.xmin, self.xmax),
-                Axis(1, self.ymin, self.ymax),
+                AxisAlignedInterval(0, self.xmin, self.xmax),
+                AxisAlignedInterval(1, self.ymin, self.ymax),
                 offset_axis=2,
                 offset=self.zmin,
                 orientation=-1,
             ),
             # The top face.
             Face(
-                Axis(0, self.xmin, self.xmax),
-                Axis(2, self.zmin, self.zmax),
+                AxisAlignedInterval(0, self.xmin, self.xmax),
+                AxisAlignedInterval(2, self.zmin, self.zmax),
                 offset_axis=1,
                 offset=self.ymax,
                 orientation=+1,
             ),
             # The bottom face.
             Face(
-                Axis(0, self.xmin, self.xmax),
-                Axis(2, self.zmin, self.zmax),
+                AxisAlignedInterval(0, self.xmin, self.xmax),
+                AxisAlignedInterval(2, self.zmin, self.zmax),
                 offset_axis=1,
                 offset=self.ymin,
                 orientation=-1,
             ),
             # The right face.
             Face(
-                Axis(1, self.ymin, self.ymax),
-                Axis(2, self.zmin, self.zmax),
+                AxisAlignedInterval(1, self.ymin, self.ymax),
+                AxisAlignedInterval(2, self.zmin, self.zmax),
                 offset_axis=0,
                 offset=self.xmax,
                 orientation=+1,
             ),
             # The left face.
             Face(
-                Axis(1, self.ymin, self.ymax),
-                Axis(2, self.zmin, self.zmax),
+                AxisAlignedInterval(1, self.ymin, self.ymax),
+                AxisAlignedInterval(2, self.zmin, self.zmax),
                 offset_axis=0,
                 offset=self.xmin,
                 orientation=-1,
