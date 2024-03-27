@@ -10,51 +10,6 @@ import tqdm
 import geometry
 
 
-class CoulombPotentialOperators:
-    """Potential functions caused by known charges at known locations.
-
-    The potential has the formo
-
-        f(x) = sum_i q_i / ||x-x_i||,
-
-    where x_i is the location of charge i and q_i is the charge.
-    """
-
-    @staticmethod
-    def potential_operator(
-        locations3d: torch.Tensor,
-        anchor_locations3d: torch.Tensor,
-        anchor_params: torch.Tensor,
-    ) -> torch.Tensor:
-        D2 = geometry.pairwise_squared_distances(locations3d, anchor_locations3d)
-        D2[D2 < 0.1] = 0.1
-        return D2**-0.5
-
-    @classmethod
-    def field_operator(
-        cls,
-        locations3d: torch.Tensor,
-        anchor_locations3d: torch.Tensor,
-        anchor_params: torch.Tensor,
-    ) -> torch.Tensor:
-        Dx = locations3d[:, 0][:, None] - anchor_locations3d[:, 0][None, :]
-        Dy = locations3d[:, 1][:, None] - anchor_locations3d[:, 1][None, :]
-        Dz = locations3d[:, 2][:, None] - anchor_locations3d[:, 2][None, :]
-
-        D2 = geometry.pairwise_squared_distances(locations3d, anchor_locations3d)
-        D2[D2 < 0.1] = 0.1
-
-        return torch.stack((Dx, Dy, Dz)) * D2**-1.5
-
-    @staticmethod
-    def laplacian_operator(
-        locations3d: torch.Tensor,
-        anchor_locations3d: torch.Tensor,
-        anchor_params: torch.Tensor,
-    ) -> torch.Tensor:
-        return torch.zeros((len(locations3d), len(anchor_locations3d)))
-
-
 def integral_of_gaussian(mean: float, std: float, xmin: float, xmax: float) -> float:
     """Integrate a Gaussian with given mean and variance over the given interval.
 
@@ -79,94 +34,6 @@ def integral_of_gaussian(mean: float, std: float, xmin: float, xmax: float) -> f
             - torch.special.ndtr((xmin - mean) / std)
         )
     )
-
-
-class RadialBasisFunctionOperators:
-    @staticmethod
-    def potential_operator(
-        locations3d: torch.Tensor,
-        anchor_locations3d: torch.Tensor,
-        anchor_width: torch.Tensor,
-    ) -> torch.Tensor:
-        if locations3d.shape[1] != 3:
-            raise ValueError("Locations3d must be an Nx3 tensor")
-        if anchor_locations3d.shape[1] != 3:
-            raise ValueError("anchor_locations3d must be an Mx3 tensor")
-
-        return torch.exp(
-            -0.5
-            * geometry.pairwise_squared_distances(locations3d, anchor_locations3d)
-            / anchor_width**2
-        )
-
-    @classmethod
-    def field_operator(
-        cls,
-        locations3d: torch.Tensor,
-        anchor_locations3d: torch.Tensor,
-        anchor_width: torch.Tensor,
-    ) -> torch.Tensor:
-        """A tensor that converts coeffients to the derivative of the field wrt the
-        coordinate axes at the given locations.
-
-        If f(x) is the potential function (as implemented in forward()), this
-        function returns df/(dx danchor_weights).
-
-        Returns a 3x len(locations3d) x len(anchor_locations) tensor.
-        """
-        k = cls.potential_operator(locations3d, anchor_locations3d, anchor_width)
-
-        # The derivative of k wrt the coordinat axes.
-        return (
-            -k
-            / anchor_width**2
-            * torch.stack(
-                (
-                    locations3d[:, 0][:, None] - anchor_locations3d[:, 0][None, :],
-                    locations3d[:, 1][:, None] - anchor_locations3d[:, 1][None, :],
-                    locations3d[:, 2][:, None] - anchor_locations3d[:, 2][None, :],
-                )
-            )
-        )
-
-    @staticmethod
-    def laplacian_operator(
-        locations3d: torch.Tensor,
-        anchor_locations3d: torch.Tensor,
-        anchor_width: torch.Tensor,
-    ) -> torch.Tensor:
-        D2 = geometry.pairwise_squared_distances(locations3d, anchor_locations3d)
-        k = torch.exp(-0.5 * D2 / anchor_width**2)
-        return 1 / anchor_width**2 * (D2 / anchor_width**2 - 3) * k
-
-    @staticmethod
-    def flux_through_face_operator(
-        face: geometry.Face,
-        anchor_locations3d: torch.Tensor,
-        anchor_width: torch.Tensor,
-    ) -> float:
-        return (
-            -(anchor_width**-2)
-            * integral_of_gaussian(
-                anchor_locations3d[:, face.first_axis.axis],
-                anchor_width,
-                face.first_axis.min,
-                face.first_axis.max,
-            )
-            * integral_of_gaussian(
-                anchor_locations3d[:, face.second_axis.axis],
-                anchor_width,
-                face.second_axis.min,
-                face.second_axis.max,
-            )
-            * torch.exp(
-                -0.5
-                * (face.offset - anchor_locations3d[:, face.offset_axis]) ** 2
-                / anchor_width**2
-            )
-            * (face.offset - anchor_locations3d[:, face.offset_axis])
-            * face.orientation
-        )
 
 
 class Potential(nn.Module):
@@ -282,18 +149,14 @@ class LinearPotential(Potential):
             # The un-normalized probability of each draw under the target distribution. We're
             # guaranteed that these un-normalized target probabilities are between 0 and
             # 1.
-            prob_under_target = (
-                2
-                * torch.special.expit(
-                    torch.abs(
-                        cls.laplacian_operator(
-                            proposal_sample, anchor_locations3d, anchor_width
-                        )
-                        @ coeffs
-                    )
+            lap = torch.abs(
+                cls.laplacian_operator(
+                    proposal_sample, anchor_locations3d, anchor_width
                 )
-                - 1
+                @ coeffs
             )
+
+            prob_under_target = lap / (lap + 10)
 
             # Keep each draw with the above probability.
             keep_draw = torch.rand(len(prob_under_target)) < prob_under_target
@@ -303,12 +166,137 @@ class LinearPotential(Potential):
         return torch.vstack(sample)
 
 
-class CoulombPotential(LinearPotential, CoulombPotentialOperators):
-    pass
+class CoulombPotential(LinearPotential):
+    """Potential functions caused by known charges at known locations.
+
+    The potential has the formo
+
+        f(x) = sum_i q_i / ||x-x_i||,
+
+    where x_i is the location of charge i and q_i is the charge.
+    """
+
+    @staticmethod
+    def potential_operator(
+        locations3d: torch.Tensor,
+        anchor_locations3d: torch.Tensor,
+        anchor_params: torch.Tensor,
+    ) -> torch.Tensor:
+        D2 = geometry.pairwise_squared_distances(locations3d, anchor_locations3d)
+        D2[D2 < 0.1] = 0.1
+        return D2**-0.5
+
+    @classmethod
+    def field_operator(
+        cls,
+        locations3d: torch.Tensor,
+        anchor_locations3d: torch.Tensor,
+        anchor_params: torch.Tensor,
+    ) -> torch.Tensor:
+        Dx = locations3d[:, 0][:, None] - anchor_locations3d[:, 0][None, :]
+        Dy = locations3d[:, 1][:, None] - anchor_locations3d[:, 1][None, :]
+        Dz = locations3d[:, 2][:, None] - anchor_locations3d[:, 2][None, :]
+
+        D2 = geometry.pairwise_squared_distances(locations3d, anchor_locations3d)
+        D2[D2 < 0.1] = 0.1
+
+        return torch.stack((Dx, Dy, Dz)) * D2**-1.5
+
+    @staticmethod
+    def laplacian_operator(
+        locations3d: torch.Tensor,
+        anchor_locations3d: torch.Tensor,
+        anchor_params: torch.Tensor,
+    ) -> torch.Tensor:
+        return torch.zeros((len(locations3d), len(anchor_locations3d)))
 
 
-class RadialBasisFunctionPotential(LinearPotential, RadialBasisFunctionOperators):
-    pass
+class RadialBasisFunctionPotential(LinearPotential):
+    @staticmethod
+    def potential_operator(
+        locations3d: torch.Tensor,
+        anchor_locations3d: torch.Tensor,
+        anchor_width: torch.Tensor,
+    ) -> torch.Tensor:
+        if locations3d.shape[1] != 3:
+            raise ValueError("Locations3d must be an Nx3 tensor")
+        if anchor_locations3d.shape[1] != 3:
+            raise ValueError("anchor_locations3d must be an Mx3 tensor")
+
+        return torch.exp(
+            -0.5
+            * geometry.pairwise_squared_distances(locations3d, anchor_locations3d)
+            / anchor_width**2
+        )
+
+    @classmethod
+    def field_operator(
+        cls,
+        locations3d: torch.Tensor,
+        anchor_locations3d: torch.Tensor,
+        anchor_width: torch.Tensor,
+    ) -> torch.Tensor:
+        """A tensor that converts coeffients to the derivative of the field wrt the
+        coordinate axes at the given locations.
+
+        If f(x) is the potential function (as implemented in forward()), this
+        function returns df/(dx danchor_weights).
+
+        Returns a 3x len(locations3d) x len(anchor_locations) tensor.
+        """
+        k = cls.potential_operator(locations3d, anchor_locations3d, anchor_width)
+
+        # The derivative of k wrt the coordinat axes.
+        return (
+            -k
+            / anchor_width**2
+            * torch.stack(
+                (
+                    locations3d[:, 0][:, None] - anchor_locations3d[:, 0][None, :],
+                    locations3d[:, 1][:, None] - anchor_locations3d[:, 1][None, :],
+                    locations3d[:, 2][:, None] - anchor_locations3d[:, 2][None, :],
+                )
+            )
+        )
+
+    @staticmethod
+    def laplacian_operator(
+        locations3d: torch.Tensor,
+        anchor_locations3d: torch.Tensor,
+        anchor_width: torch.Tensor,
+    ) -> torch.Tensor:
+        D2 = geometry.pairwise_squared_distances(locations3d, anchor_locations3d)
+        k = torch.exp(-0.5 * D2 / anchor_width**2)
+        return 1 / anchor_width**2 * (D2 / anchor_width**2 - 3) * k
+
+    @staticmethod
+    def flux_through_face_operator(
+        face: geometry.Face,
+        anchor_locations3d: torch.Tensor,
+        anchor_width: torch.Tensor,
+    ) -> float:
+        return (
+            -(anchor_width**-2)
+            * integral_of_gaussian(
+                anchor_locations3d[:, face.first_axis.axis],
+                anchor_width,
+                face.first_axis.min,
+                face.first_axis.max,
+            )
+            * integral_of_gaussian(
+                anchor_locations3d[:, face.second_axis.axis],
+                anchor_width,
+                face.second_axis.min,
+                face.second_axis.max,
+            )
+            * torch.exp(
+                -0.5
+                * (face.offset - anchor_locations3d[:, face.offset_axis]) ** 2
+                / anchor_width**2
+            )
+            * (face.offset - anchor_locations3d[:, face.offset_axis])
+            * face.orientation
+        )
 
 
 def minimum_norm_in_subspace(
@@ -332,13 +320,19 @@ def minimum_norm_in_subspace(
     return (V @ torch.linalg.solve(K @ V, b)).to(original_type)
 
 
+def guess_anchor_width(anchor_locations3d: torch.Tensor) -> float:
+    return torch.linalg.norm(
+        anchor_locations3d - anchor_locations3d.mean(axis=0), dim=1
+    ).mean()
+
+
 def fit_radial_basis_function_potential(
     universe: geometry.Box,
     conductor_locations3d: torch.Tensor,
     conductor_potentials: torch.Tensor,
     verbose=True,
     num_rounds=70,
-    anchor_width_scale=0.2,
+    anchor_width_scale=0.5,
 ) -> RadialBasisFunctionPotential:
     if not (conductor_locations3d.ndim == 2 and conductor_locations3d.shape[1] == 3):
         raise ValueError("conductor_locations3d must be Nx3 tensor.")
@@ -365,16 +359,15 @@ def fit_radial_basis_function_potential(
     num_anchors = []
     energies = []
     constraint_violations = []
-    extra_anchor_locations3d = None
+    extra_anchor_locations3d = torch.empty((0, 3))
     for _ in tqdm.tqdm(range(num_rounds)):
-        if extra_anchor_locations3d is not None:
-            # Add the anchor locations that were discovered during the
-            # previous iteration of this loop.
-            anchor_locations3d = torch.vstack(
-                (anchor_locations3d, extra_anchor_locations3d)
-            )
+        # Add the anchor locations that were discovered during the previous
+        # iteration of this loop.
+        anchor_locations3d = torch.vstack(
+            (anchor_locations3d, extra_anchor_locations3d)
+        )
 
-        anchor_width = torch.std(anchor_locations3d).item() * anchor_width_scale
+        anchor_width = guess_anchor_width(anchor_locations3d) * anchor_width_scale
 
         # A matrix that stores the squared distance between every pair of anchor locations.
         D2 = geometry.pairwise_squared_distances(anchor_locations3d, anchor_locations3d)
@@ -411,7 +404,7 @@ def fit_radial_basis_function_potential(
 
     if verbose:
         _, ax = plt.subplots(1, 1)
-        ax.plot(num_anchors, energies, color="c")
+        ax.plot(num_anchors, energies, color="c", marker=".")
         ax.set_xlabel("Number of anchors")
         ax.set_ylabel("Field energy", color="c")
         ax.tick_params(axis="y", labelcolor="c")
