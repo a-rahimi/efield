@@ -87,8 +87,8 @@ $$\begin{align}
 
 The second equality follows because the integral is the expected value of
 $(x-x_i)^\top(x-x_j)$ when $x$ is drawn from a Gaussian distribution with mean
-$(x_i+x_j)/2$ and variance $\sigma^2/2$. This is derived step-by-step in the
-appendix and tested in `test_field_energy`.
+$(x_i+x_j)/2$ and variance $\sigma^2/2$. This is derived in more detail in the
+appendix.
 
 # Solving for the parameters of the field
 
@@ -114,7 +114,7 @@ the appendix:
 
 $$\begin{align}
 \alpha^* &= V(KV)^{-1} v_0 \\
-v_0 &= M^{-1} K^\top
+V &\equiv M^{-1} K^\top
 \end{align}$$
 
 # Recovering the charge from the field

@@ -48,11 +48,13 @@ class Box(NamedTuple):
             .T
         )
 
-    def sizes(self) -> Tuple[float, float, float]:
-        return (
-            (self.xmax - self.xmin),
-            (self.ymax - self.ymin),
-            (self.zmax - self.zmin),
+    def sizes(self) -> torch.Tensor:
+        return torch.tensor(
+            (
+                self.xmax - self.xmin,
+                self.ymax - self.ymin,
+                self.zmax - self.zmin,
+            )
         )
 
     def center(self) -> torch.Tensor:
@@ -62,6 +64,11 @@ class Box(NamedTuple):
             )
             / 2
         )
+
+    def expand(self, scale: float) -> "Box":
+        mins = self.center() - scale * self.sizes() / 2
+        maxs = self.center() + scale * self.sizes() / 2
+        return Box(mins[0], maxs[0], mins[1], maxs[1], mins[2], maxs[2])
 
     def faces(self) -> Tuple[Face]:
         return (

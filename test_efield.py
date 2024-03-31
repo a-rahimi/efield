@@ -94,13 +94,10 @@ def test_field_energy():
     ).sum(axis=2)
     empirical = (Vxyz**2).sum() * box_width**3 / len(xyz)
 
-    # Compare against the analytic solutino derived in simulator.md
-    D2 = geometry.pairwise_squared_distances(anchor_locations3d, anchor_locations3d)
-    analytical = (
-        torch.sum(torch.exp(-D2 / sigma**2 / 4) * (3 / 2 * sigma**2 - D2 / 4))
-        / sigma
-        * torch.pi ** (3 / 2)
-    )
+    # Compare against the analytic solution derived in simulator.md
+    analytical = efield.RadialBasisFunctionPotential.field_energy_operator(
+        anchor_locations3d, sigma
+    ).sum()
 
     assert torch.allclose(analytical, empirical, rtol=1e-2), (analytical, empirical)
 

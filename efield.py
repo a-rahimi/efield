@@ -149,14 +149,19 @@ class LinearPotential(Potential):
             # The un-normalized probability of each draw under the target distribution. We're
             # guaranteed that these un-normalized target probabilities are between 0 and
             # 1.
-            lap = torch.abs(
-                cls.laplacian_operator(
-                    proposal_sample, anchor_locations3d, anchor_width
+            lap = (
+                (
+                    cls.laplacian_operator(
+                        proposal_sample, anchor_locations3d, anchor_width
+                    )
+                    @ coeffs
                 )
-                @ coeffs
+                .abs()
+                .log()
+                .abs()
             )
 
-            prob_under_target = lap / (lap + 10)
+            prob_under_target = lap / (lap + 1)
 
             # Keep each draw with the above probability.
             keep_draw = torch.rand(len(prob_under_target)) < prob_under_target
@@ -298,6 +303,19 @@ class RadialBasisFunctionPotential(LinearPotential):
             * face.orientation
         )
 
+    @staticmethod
+    def field_energy_operator(
+        anchor_locations3d: torch.Tensor,
+        anchor_width: torch.Tensor,
+    ) -> torch.Tensor:
+        D2 = geometry.pairwise_squared_distances(anchor_locations3d, anchor_locations3d)
+        return (
+            torch.exp(-D2 / anchor_width**2 / 4)
+            * (3 / 2 * anchor_width**2 - D2 / 4)
+            / anchor_width
+            * torch.pi ** (3 / 2)
+        )
+
 
 def minimum_norm_in_subspace(
     M: torch.Tensor, K: torch.Tensor, b: torch.Tensor
@@ -369,20 +387,19 @@ def fit_radial_basis_function_potential(
 
         anchor_width = guess_anchor_width(anchor_locations3d) * anchor_width_scale
 
-        # A matrix that stores the squared distance between every pair of anchor locations.
-        D2 = geometry.pairwise_squared_distances(anchor_locations3d, anchor_locations3d)
-
         # A matrix M so that coeffs' M coeffs gives the energy of the field.
-        M = (
-            torch.exp(-D2 / (anchor_width**2 * 4))
-            * (1.5 * anchor_width**2 - D2 / 4)
-            / anchor_width
+        M = RadialBasisFunctionPotential.field_energy_operator(
+            anchor_locations3d, anchor_width
         )
 
         # This matrix positive definite, but numerical issues can cause it to
         # have negative eigenvalues. Add a small multiple of identity to it to
         # prevent this from happening.
         M += 1e-4 * torch.eye(len(anchor_locations3d))
+
+        # M += 1e-2 * RadialBasisFunctionPotential.potential_operator(
+        # anchor_locations3d, anchor_locations3d, anchor_width
+        # )
 
         # A matrix that maps coefficients to voltage on the M conductors.
         K = RadialBasisFunctionPotential.potential_operator(
