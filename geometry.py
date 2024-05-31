@@ -130,6 +130,20 @@ def sample_uniform(box: Box, sample_size: int) -> torch.Tensor:
     )
 
 
+def sample_near_points(
+    locations3d: torch.Tensor,
+    weights: torch.Tensor,
+    num_draws: int,
+    std_dev: float = 1.0,
+) -> torch.Tensor:
+    center_indices = torch.multinomial(
+        weights / weights.sum(), num_draws, replacement=True
+    )
+    return locations3d[center_indices] + std_dev * torch.randn(
+        (num_draws, locations3d.shape[1])
+    )
+
+
 def pairwise_squared_distances(X, Y):
     # D[i,j] = ||x[i]-y[j]||^2
     #        = ||x[i]||^2 + ||y[j]|| - 2x[i]'y[j]

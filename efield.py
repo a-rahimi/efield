@@ -1,8 +1,5 @@
-from typing import NamedTuple, Tuple
+from typing import List, NamedTuple, Tuple
 
-import math
-
-import matplotlib.pylab as plt
 import torch
 from torch import nn
 import tqdm
@@ -10,30 +7,26 @@ import tqdm
 import geometry
 
 
-def integral_of_gaussian(mean: float, std: float, xmin: float, xmax: float) -> float:
-    """Integrate a Gaussian with given mean and variance over the given interval.
-
-    Compute
-       int_xmin^xmax exp(-0.5 * (x-mean)^2 / std^2) dx
-
-    Notably, the Gaussian is not normalized.
+def affine_projection(A, b):
     """
-    # Pytorch's ndtr function computes
-    #   1/sqrt(2pi) int_-infty^x exp(-0.5 t^2/2) dt
+    Produces an operator that maps any x to the nearest solution of
 
-    # With the change of variables t(x)=(x-mean)/std, the integral we wanted to compute
-    # becomes
-    #   int_xmin^xmax exp(-(x-mean)^2/std^2/2) dx
-    # = int_t(xmin)^t(xmax) exp(-t^2/2) * std * dt
-    # = std*sqrt(2pi) * (ndtr(t(xmax)) - ndtr(t(xmin)))
-    return (
-        std
-        * math.sqrt(2 * torch.pi)
-        * (
-            torch.special.ndtr((xmax - mean) / std)
-            - torch.special.ndtr((xmin - mean) / std)
-        )
-    )
+        A u = b
+
+    In other words, this solves the problem
+
+      min_u ||u-x|| s.t. Au=b
+
+    The solution is returned as an affine operator (offset, proj) that maps x to
+    u via
+
+       u = proj @ x + offset
+    """
+    U, s, Vt = torch.linalg.svd(A, full_matrices=False)
+
+    offset = (Vt.T / s) @ U.T @ b
+    proj = torch.eye(A.shape[1]) - Vt.T @ Vt
+    return offset, proj
 
 
 class Potential(nn.Module):
@@ -41,9 +34,6 @@ class Potential(nn.Module):
         raise NotImplementedError
 
     def field(self, locations3d: torch.Tensor) -> torch.Tensor:
-        raise NotImplementedError
-
-    def laplacian(self, locations3d: torch.Tensor) -> torch.Tensor:
         raise NotImplementedError
 
     def flux_through_face(self, face: geometry.Face) -> float:
@@ -66,6 +56,10 @@ class LinearPotential(Potential):
         anchor_parameters: torch.Tensor,
     ):
         super().__init__()
+
+        if len(anchor_locations3d) != len(anchor_coeffs):
+            raise ValueError("Need one coefficient per anchor")
+
         self.anchor_locations3d = nn.Parameter(anchor_locations3d)
         self.anchor_coeffs = nn.Parameter(anchor_coeffs)
         self.anchor_parameters = nn.Parameter(anchor_parameters)
@@ -86,6 +80,7 @@ class LinearPotential(Potential):
             @ self.anchor_coeffs
         )
 
+<<<<<<< HEAD
     def laplacian(self, locations3d: torch.Tensor) -> torch.Tensor:
         return (
             self.laplacian_operator(
@@ -165,6 +160,8 @@ class LinearPotential(Potential):
 
         return torch.vstack(sample)
 
+=======
+>>>>>>> 438d1f8 (WIP: new way to compute fields)
 
 class CoulombPotential(LinearPotential):
     """Potential functions caused by known charges at known locations.
@@ -185,9 +182,8 @@ class CoulombPotential(LinearPotential):
         D2 = eps + geometry.pairwise_squared_distances(locations3d, anchor_locations3d)
         return 1 / D2.sqrt()
 
-    @classmethod
+    @staticmethod
     def field_operator(
-        cls,
         locations3d: torch.Tensor,
         anchor_locations3d: torch.Tensor,
         eps: torch.Tensor,
@@ -200,256 +196,113 @@ class CoulombPotential(LinearPotential):
 
         return torch.stack((Dx, Dy, Dz)) * D2**-1.5
 
-    @staticmethod
-    def laplacian_operator(
-        locations3d: torch.Tensor,
-        anchor_locations3d: torch.Tensor,
-        eps: torch.Tensor,
-    ) -> torch.Tensor:
-        # TODO: if there is an exact match between a locations3d and
-        # anchor_locations3d, set to infty.
-        return torch.zeros((len(locations3d), len(anchor_locations3d)))
-
-    @classmethod
-    def sample_from_constraints(
-        cls,
-        universe: geometry.Box,
-        anchor_locations3d: torch.Tensor,
-        coeffs: torch.Tensor,
-        conductor_locations3d: torch.Tensor,
-        conductor_potentials: torch.Tensor,
-    ) -> torch.Tensor:
-        estimated_conductor_potentials = (
-            cls.potential_operator(conductor_locations3d, anchor_locations3d, 1e-2)
-            @ coeffs
-        )
-
-
-class RadialBasisFunctionPotential(LinearPotential):
-    @staticmethod
-    def potential_operator(
-        locations3d: torch.Tensor,
-        anchor_locations3d: torch.Tensor,
-        anchor_width: torch.Tensor,
-    ) -> torch.Tensor:
-        if locations3d.shape[1] != 3:
-            raise ValueError("Locations3d must be an Nx3 tensor")
-        if anchor_locations3d.shape[1] != 3:
-            raise ValueError("anchor_locations3d must be an Mx3 tensor")
-
-        return torch.exp(
-            -0.5
-            * geometry.pairwise_squared_distances(locations3d, anchor_locations3d)
-            / anchor_width**2
-        )
-
-    @classmethod
-    def field_operator(
-        cls,
-        locations3d: torch.Tensor,
-        anchor_locations3d: torch.Tensor,
-        anchor_width: torch.Tensor,
-    ) -> torch.Tensor:
-        """A tensor that converts coeffients to the derivative of the field wrt the
-        coordinate axes at the given locations.
-
-        If f(x) is the potential function (as implemented in forward()), this
-        function returns df/(dx danchor_weights).
-
-        Returns a 3x len(locations3d) x len(anchor_locations) tensor.
+    def reduce_field_energy(self, universe: geometry.Box, step: float) -> float:
+        """Find an affine subspace of coefficients that satisfies the conductor
+        potential constraints.
         """
-        k = cls.potential_operator(locations3d, anchor_locations3d, anchor_width)
+        # Get an unbiased estimate of the field energy.  The energy of the field
+        # is the expected value of the field magnitude throughout the universe.
+        # We obtain an unbiased estimate of this energy by computing the field
+        # magnitude on a random set of points in the universe.
+        Dx, Dy, Dz = self.field(geometry.sample_uniform(universe, 100))
+        field_energy = (Dx**2 + Dy**2 + Dz**2).mean()
 
-        # The derivative of k wrt the coordinat axes.
-        return (
-            -k
-            / anchor_width**2
-            * torch.stack(
-                (
-                    locations3d[:, 0][:, None] - anchor_locations3d[:, 0][None, :],
-                    locations3d[:, 1][:, None] - anchor_locations3d[:, 1][None, :],
-                    locations3d[:, 2][:, None] - anchor_locations3d[:, 2][None, :],
-                )
-            )
+        # Compute the gradient of the field energy with respect to the
+        # parameters and update them.
+        self.anchor_locations3d.grad = None
+        self.anchor_coeffs.grad = None
+        field_energy.backward(inputs=[self.anchor_locations3d, self.anchor_coeffs])
+
+        with torch.no_grad():
+            self.anchor_locations3d -= step * self.anchor_locations3d.grad
+            self.anchor_coeffs -= step * self.anchor_coeffs.grad
+
+        return field_energy
+
+    def project_coeffs(
+        self, conductor_locations3d: torch.Tensor, conductor_potentials: torch.Tensor
+    ):
+        offset, proj = affine_projection(
+            CoulombPotential.potential_operator(
+                conductor_locations3d, self.anchor_locations3d, self.anchor_parameters
+            ),
+            conductor_potentials,
         )
-
-    @staticmethod
-    def laplacian_operator(
-        locations3d: torch.Tensor,
-        anchor_locations3d: torch.Tensor,
-        anchor_width: torch.Tensor,
-    ) -> torch.Tensor:
-        D2 = geometry.pairwise_squared_distances(locations3d, anchor_locations3d)
-        k = torch.exp(-0.5 * D2 / anchor_width**2)
-        return 1 / anchor_width**2 * (D2 / anchor_width**2 - 3) * k
-
-    @staticmethod
-    def flux_through_face_operator(
-        face: geometry.Face,
-        anchor_locations3d: torch.Tensor,
-        anchor_width: torch.Tensor,
-    ) -> float:
-        return (
-            -(anchor_width**-2)
-            * integral_of_gaussian(
-                anchor_locations3d[:, face.first_axis.axis],
-                anchor_width,
-                face.first_axis.min,
-                face.first_axis.max,
-            )
-            * integral_of_gaussian(
-                anchor_locations3d[:, face.second_axis.axis],
-                anchor_width,
-                face.second_axis.min,
-                face.second_axis.max,
-            )
-            * torch.exp(
-                -0.5
-                * (face.offset - anchor_locations3d[:, face.offset_axis]) ** 2
-                / anchor_width**2
-            )
-            * (face.offset - anchor_locations3d[:, face.offset_axis])
-            * face.orientation
-        )
-
-    @staticmethod
-    def field_energy_operator(
-        anchor_locations3d: torch.Tensor,
-        anchor_width: torch.Tensor,
-    ) -> torch.Tensor:
-        D2 = geometry.pairwise_squared_distances(anchor_locations3d, anchor_locations3d)
-        return (
-            torch.exp(-D2 / anchor_width**2 / 4)
-            * (3 / 2 * anchor_width**2 - D2 / 4)
-            / anchor_width
-            * torch.pi ** (3 / 2)
-        )
+        with torch.no_grad():
+            self.anchor_coeffs[:] = offset + proj @ self.anchor_coeffs
 
 
-def minimum_norm_in_subspace(
-    M: torch.Tensor, K: torch.Tensor, b: torch.Tensor
-) -> torch.Tensor:
-    """Minimize x'Mx subject to Ax=b over x.
-
-    See simulatord.md for a derivation.
-    """
-    if M.shape[0] != M.shape[1]:
-        raise ValueError("M must be a square matrix")
-    if K.shape[0] > K.shape[1]:
-        raise ValueError("The constraint must be under-determined")
-
-    original_type = M.dtype
-    M = M.to(torch.float64)
-    K = K.to(torch.float64)
-    b = b.to(torch.float64)
-
-    V = torch.linalg.solve(M, K.T)
-    return (V @ torch.linalg.solve(K @ V, b)).to(original_type)
+class FittingResult(NamedTuple):
+    num_anchors: int
+    energy: float
+    constraint_violation: float
 
 
-def guess_anchor_width(anchor_locations3d: torch.Tensor) -> float:
-    D2 = geometry.pairwise_squared_distances(anchor_locations3d, anchor_locations3d)
-    return D2.median(dim=1).values.mean().sqrt()
-
-
-def fit_radial_basis_function_potential(
+def fit_coulomb_potential(
     universe: geometry.Box,
     conductor_locations3d: torch.Tensor,
     conductor_potentials: torch.Tensor,
-    verbose=True,
-    num_rounds=30,
-    anchor_width_scale=1.0,
-) -> RadialBasisFunctionPotential:
+    max_anchors=300,
+    num_projected_gradient_descent_steps=100,
+) -> Tuple[CoulombPotential, List[FittingResult]]:
     if not (conductor_locations3d.ndim == 2 and conductor_locations3d.shape[1] == 3):
         raise ValueError("conductor_locations3d must be Nx3 tensor.")
     if conductor_potentials.ndim != 1:
         raise ValueError("condctuctor_potential must be an N-dimensional vector.")
 
-    # Solve the constrained optimization problem
-    #
-    #   min_f \int_x ||d/dx f(x)||^2
-    #   s.t.  f(x) = V(x) when for all x on the conductors.
-    #
-    # When f(x) = sum_i coeffs[i] exp(-||x-anchor[i]||^2/width^2),
-    # this problem reduces to minimizing a quadratic form subject to linear
-    # constraints. See simulation.md for an explanation.
-    #
-    # There is one additional trick, which is not covered in simulation.md:
-    # The anchor locations are added iteratively. At each iteration of the loop
-    # below, we sample new anchors wherever the Laplacian of the resulting field
-    # is high.
-
-    # Add anchor gradually. Start with the conductors and add from there.
-    anchor_locations3d = conductor_locations3d
-
-    num_anchors = []
-    anchor_widths = []
-    energies = []
-    constraint_violations = []
-    laplacian_norms = []
-    extra_anchor_locations3d = torch.empty((0, 3))
-    for _ in tqdm.tqdm(range(num_rounds)):
-        # Add the anchor locations that were discovered during the previous
-        # iteration of this loop.
-        anchor_locations3d = torch.vstack(
-            (anchor_locations3d, extra_anchor_locations3d)
-        )
-
-        anchor_width = guess_anchor_width(anchor_locations3d) * anchor_width_scale
-
-        # A matrix M so that coeffs' M coeffs gives the energy of the field.
-        M = RadialBasisFunctionPotential.field_energy_operator(
-            anchor_locations3d, anchor_width
-        )
-
-        # This matrix positive definite, but numerical issues can cause it to
-        # have negative eigenvalues. Add a small multiple of identity to it to
-        # prevent this from happening.
-        M += 1e-4 * torch.eye(len(anchor_locations3d))
-
-        # M += 1e-2 * RadialBasisFunctionPotential.potential_operator(
-        # anchor_locations3d, anchor_locations3d, anchor_width
-        # )
-
-        # A matrix that maps coefficients to voltage on the M conductors.
-        K = RadialBasisFunctionPotential.potential_operator(
-            conductor_locations3d, anchor_locations3d, anchor_width
-        )
-
-        coeffs = minimum_norm_in_subspace(M, K, conductor_potentials)
-
-        # Sample some new anchor points. These are added to the set of anchors
-        # on the next iteration of the loop.
-        extra_anchor_locations3d = RadialBasisFunctionPotential.sample_from_laplacian(
-            universe, anchor_locations3d, anchor_width, coeffs
-        )
-        num_anchors.append(len(anchor_locations3d))
-        anchor_widths.append(anchor_width)
-        energies.append(coeffs @ M @ coeffs)
-        constraint_violations.append(
-            torch.abs(K @ coeffs - conductor_potentials).mean()
-        )
-
-        laplacian = (
-            RadialBasisFunctionPotential.laplacian_operator(
-                universe.grid(50, 50, 50), anchor_locations3d, anchor_width
-            )
-            @ coeffs
-        )
-        laplacian_norms.append(laplacian.abs().mean())
-
-    if verbose:
-        _, ax = plt.subplots(1, 1)
-        ax.plot(num_anchors, energies, color="c", marker=".")
-        ax.set_xlabel("Number of anchors")
-        ax.set_ylabel("Field energy", color="c")
-        ax.tick_params(axis="y", labelcolor="c")
-
-        ax2 = ax.twinx()
-        ax2.plot(num_anchors, laplacian_norms, color="r")
-        ax2.set_ylabel("Mean laplacian norm", color="r")
-        ax2.tick_params(axis="y", labelcolor="r")
-
-    return RadialBasisFunctionPotential(
-        anchor_locations3d, coeffs, torch.tensor(anchor_width)
+    # Initially, anchors are centered near (but not on top of) the conductors.
+    potential = CoulombPotential(
+        anchor_locations3d=geometry.sample_near_points(
+            conductor_locations3d,
+            weights=torch.ones(len(conductor_locations3d)),
+            num_draws=len(conductor_locations3d) * 2,
+        ),
+        anchor_coeffs=torch.zeros(len(conductor_locations3d) * 2),
+        anchor_parameters=torch.tensor(1e-2),
     )
+    extra_anchor_locations3d = torch.zeros((0, 3))
+
+    results: List[FittingResult] = []
+    progress = tqdm.tqdm(total=max_anchors)
+    while len(potential.anchor_locations3d) < max_anchors:
+        # Add the extra anchors discovered in the previous iteration of this loop.
+        potential = CoulombPotential(
+            anchor_locations3d=torch.vstack(
+                (potential.anchor_locations3d, extra_anchor_locations3d)
+            ),
+            anchor_coeffs=torch.hstack(
+                (potential.anchor_coeffs, torch.zeros(len(extra_anchor_locations3d)))
+            ),
+            anchor_parameters=potential.anchor_parameters,
+        )
+
+        # Take stochastic gradient steps to reduce the field's energy. This loop modifies
+        # both the coefficients and anchors of the potential.
+        for _ in range(num_projected_gradient_descent_steps):
+            # Reduce the energy of the field, ignoring the boundary conditions.
+            field_energy = potential.reduce_field_energy(universe, step=1e-2)
+
+            # Project the coefficients so the field satisfies the boundary conditions.
+            potential.project_coeffs(conductor_locations3d, conductor_potentials)
+
+        # Sample new anchor locations based on constraint violations.
+        constraint_defects = torch.abs(
+            potential(conductor_locations3d) - conductor_potentials
+        )
+
+        extra_anchor_locations3d = geometry.sample_near_points(
+            conductor_locations3d,
+            weights=constraint_defects,
+            num_draws=max(10, len(potential.anchor_locations3d) // 10),
+        )
+
+        result = FittingResult(
+            num_anchors=len(potential.anchor_locations3d),
+            energy=field_energy.item(),
+            constraint_violation=constraint_defects.mean().item(),
+        )
+        results.append(result)
+        print(result)
+        progress.update(n=len(extra_anchor_locations3d))
+
+    return potential, results
