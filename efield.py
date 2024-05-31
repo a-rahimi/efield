@@ -109,7 +109,7 @@ class LinearPotential(Potential):
         anchor_locations3d: torch.Tensor,
         anchor_width: torch.Tensor,
         coeffs: torch.Tensor,
-        sample_size: int = 10,
+        sample_size: int = 50,
     ):
         # We want to draw a sample from a distribution p(x). We don't know how to
         # directly sample from p(x), and we can only evaluate it up to a constant.
@@ -149,16 +149,11 @@ class LinearPotential(Potential):
             # The un-normalized probability of each draw under the target distribution. We're
             # guaranteed that these un-normalized target probabilities are between 0 and
             # 1.
-            lap = (
-                (
-                    cls.laplacian_operator(
-                        proposal_sample, anchor_locations3d, anchor_width
-                    )
-                    @ coeffs
+            lap = torch.abs(
+                cls.laplacian_operator(
+                    proposal_sample, anchor_locations3d, anchor_width
                 )
-                .abs()
-                .log()
-                .abs()
+                @ coeffs
             )
 
             prob_under_target = lap / (lap + 1)
@@ -185,25 +180,23 @@ class CoulombPotential(LinearPotential):
     def potential_operator(
         locations3d: torch.Tensor,
         anchor_locations3d: torch.Tensor,
-        anchor_params: torch.Tensor,
+        eps: torch.Tensor,
     ) -> torch.Tensor:
-        D2 = geometry.pairwise_squared_distances(locations3d, anchor_locations3d)
-        D2[D2 < 0.1] = 0.1
-        return D2**-0.5
+        D2 = eps + geometry.pairwise_squared_distances(locations3d, anchor_locations3d)
+        return 1 / D2.sqrt()
 
     @classmethod
     def field_operator(
         cls,
         locations3d: torch.Tensor,
         anchor_locations3d: torch.Tensor,
-        anchor_params: torch.Tensor,
+        eps: torch.Tensor,
     ) -> torch.Tensor:
         Dx = locations3d[:, 0][:, None] - anchor_locations3d[:, 0][None, :]
         Dy = locations3d[:, 1][:, None] - anchor_locations3d[:, 1][None, :]
         Dz = locations3d[:, 2][:, None] - anchor_locations3d[:, 2][None, :]
 
-        D2 = geometry.pairwise_squared_distances(locations3d, anchor_locations3d)
-        D2[D2 < 0.1] = 0.1
+        D2 = eps + geometry.pairwise_squared_distances(locations3d, anchor_locations3d)
 
         return torch.stack((Dx, Dy, Dz)) * D2**-1.5
 
@@ -211,9 +204,25 @@ class CoulombPotential(LinearPotential):
     def laplacian_operator(
         locations3d: torch.Tensor,
         anchor_locations3d: torch.Tensor,
-        anchor_params: torch.Tensor,
+        eps: torch.Tensor,
     ) -> torch.Tensor:
+        # TODO: if there is an exact match between a locations3d and
+        # anchor_locations3d, set to infty.
         return torch.zeros((len(locations3d), len(anchor_locations3d)))
+
+    @classmethod
+    def sample_from_constraints(
+        cls,
+        universe: geometry.Box,
+        anchor_locations3d: torch.Tensor,
+        coeffs: torch.Tensor,
+        conductor_locations3d: torch.Tensor,
+        conductor_potentials: torch.Tensor,
+    ) -> torch.Tensor:
+        estimated_conductor_potentials = (
+            cls.potential_operator(conductor_locations3d, anchor_locations3d, 1e-2)
+            @ coeffs
+        )
 
 
 class RadialBasisFunctionPotential(LinearPotential):
@@ -339,9 +348,8 @@ def minimum_norm_in_subspace(
 
 
 def guess_anchor_width(anchor_locations3d: torch.Tensor) -> float:
-    return torch.linalg.norm(
-        anchor_locations3d - anchor_locations3d.mean(axis=0), dim=1
-    ).mean()
+    D2 = geometry.pairwise_squared_distances(anchor_locations3d, anchor_locations3d)
+    return D2.median(dim=1).values.mean().sqrt()
 
 
 def fit_radial_basis_function_potential(
@@ -349,8 +357,8 @@ def fit_radial_basis_function_potential(
     conductor_locations3d: torch.Tensor,
     conductor_potentials: torch.Tensor,
     verbose=True,
-    num_rounds=70,
-    anchor_width_scale=0.5,
+    num_rounds=30,
+    anchor_width_scale=1.0,
 ) -> RadialBasisFunctionPotential:
     if not (conductor_locations3d.ndim == 2 and conductor_locations3d.shape[1] == 3):
         raise ValueError("conductor_locations3d must be Nx3 tensor.")
@@ -375,8 +383,10 @@ def fit_radial_basis_function_potential(
     anchor_locations3d = conductor_locations3d
 
     num_anchors = []
+    anchor_widths = []
     energies = []
     constraint_violations = []
+    laplacian_norms = []
     extra_anchor_locations3d = torch.empty((0, 3))
     for _ in tqdm.tqdm(range(num_rounds)):
         # Add the anchor locations that were discovered during the previous
@@ -414,10 +424,19 @@ def fit_radial_basis_function_potential(
             universe, anchor_locations3d, anchor_width, coeffs
         )
         num_anchors.append(len(anchor_locations3d))
+        anchor_widths.append(anchor_width)
         energies.append(coeffs @ M @ coeffs)
         constraint_violations.append(
             torch.abs(K @ coeffs - conductor_potentials).mean()
         )
+
+        laplacian = (
+            RadialBasisFunctionPotential.laplacian_operator(
+                universe.grid(50, 50, 50), anchor_locations3d, anchor_width
+            )
+            @ coeffs
+        )
+        laplacian_norms.append(laplacian.abs().mean())
 
     if verbose:
         _, ax = plt.subplots(1, 1)
@@ -427,8 +446,8 @@ def fit_radial_basis_function_potential(
         ax.tick_params(axis="y", labelcolor="c")
 
         ax2 = ax.twinx()
-        ax2.plot(num_anchors, constraint_violations, color="r")
-        ax2.set_ylabel("Constraint violation", color="r")
+        ax2.plot(num_anchors, laplacian_norms, color="r")
+        ax2.set_ylabel("Mean laplacian norm", color="r")
         ax2.tick_params(axis="y", labelcolor="r")
 
     return RadialBasisFunctionPotential(
